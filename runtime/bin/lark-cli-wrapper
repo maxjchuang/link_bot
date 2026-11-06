@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+
+tool_home="${LINK_BOT_TOOL_HOME:-${CODEX_HOME:-/home/codex/.codex}/tool-home}"
+mkdir -p "$tool_home"
+
+# Every user-identity invocation may refresh and rewrite the same token store.
+# Serialize those processes so parallel agent tool calls cannot consume the
+# same refresh token. Explicit bot calls do not touch user credentials.
+case " $* " in
+  *" --as bot "*) ;;
+  *)
+    lock_file="${tool_home}/.lark-cli.lock"
+    exec 9>"$lock_file"
+    if ! flock -w "${LARK_CLI_LOCK_TIMEOUT_SECONDS:-120}" 9; then
+      printf '%s\n' '{"ok":false,"error":{"type":"runtime","subtype":"credential_lock_timeout","message":"Timed out waiting for the shared lark-cli credential lock."}}' >&2
+      exit 75
+    fi
+    ;;
+esac
+
+HOME="$tool_home" exec /usr/local/libexec/lark-cli "$@"

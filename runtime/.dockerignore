@@ -1,0 +1,6 @@
+*
+!Dockerfile
+!bin/
+!bin/**
+!defaults/
+!defaults/**

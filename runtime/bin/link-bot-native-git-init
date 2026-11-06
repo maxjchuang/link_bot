@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+export GH_CONFIG_DIR="${GH_CONFIG_DIR:-${LINK_BOT_TOOL_HOME:-${CODEX_HOME:-/home/codex/.codex}/tool-home}/gh}"
+gh auth status >/dev/null

@@ -1,0 +1,87 @@
+#!/bin/sh
+set -eu
+
+real_git=/usr/bin/git
+command_name=""
+skip_next=0
+for argument in "$@"; do
+  if [ "$skip_next" = 1 ]; then skip_next=0; continue; fi
+  case "$argument" in
+    -C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env) skip_next=1 ;;
+    --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--config-env=*|-*) ;;
+    *) command_name="$argument"; break ;;
+  esac
+done
+
+if [ "$command_name" = push ]; then
+  for argument in "$@"; do
+    case "$argument" in
+      --force|-f|--force=*)
+        if [ -n "${LINK_BOT_OWNER_ID:-}" ] && [ -n "${LINK_BOT_SANDBOX_ID:-}" ]; then
+          echo "Link Bot policy: bare git push --force is forbidden; use --force-with-lease with an expected remote SHA." >&2
+        else
+          echo "Link Bot policy: bare git push --force is forbidden; use --force-with-lease after approval." >&2
+        fi
+        exit 64
+        ;;
+      --force-with-lease|--force-with-lease=*)
+        if [ -z "${LINK_BOT_OWNER_ID:-}" ] || [ -z "${LINK_BOT_SANDBOX_ID:-}" ]; then
+          echo "Link Bot policy: this non-fast-forward update requires the exact-SHA approval card. Use the Link Bot approval flow instead of pushing directly." >&2
+          exit 65
+        fi
+        ;;
+    esac
+  done
+fi
+
+case "$command_name" in
+  fetch|pull|push|clone|ls-remote|submodule)
+    provider=""
+    for argument in "$@"; do
+      case "$argument" in
+        git@github.com:*|ssh://git@github.com/*|https://github.com/*) provider=github ;;
+      esac
+    done
+    if [ -z "$provider" ]; then
+      git_directory=$(pwd)
+      next_directory=0
+      after_command=0
+      skip_value=0
+      remote_name=origin
+      for argument in "$@"; do
+        if [ "$next_directory" = 1 ]; then
+          git_directory=$(cd "$git_directory" && cd "$argument" && pwd)
+          next_directory=0
+          continue
+        fi
+        if [ "$argument" = -C ]; then next_directory=1; continue; fi
+        if [ "$after_command" = 0 ]; then
+          if [ "$argument" = "$command_name" ]; then after_command=1; fi
+          continue
+        fi
+        if [ "$skip_value" = 1 ]; then skip_value=0; continue; fi
+        case "$argument" in
+          --depth|--shallow-since|--shallow-exclude|--upload-pack|--receive-pack|-o|--push-option) skip_value=1 ;;
+          -*) ;;
+          *) remote_name=$argument; break ;;
+        esac
+      done
+      remote_url=$("$real_git" -C "$git_directory" remote get-url "$remote_name" 2>/dev/null || true)
+      case "$remote_url" in
+        git@github.com:*|ssh://git@github.com/*|https://github.com/*) provider=github ;;
+      esac
+    fi
+    if [ "$provider" = github ]; then
+      # Rewrite GitHub SSH URLs to HTTPS
+      # and ask gh for credentials through Git's pipe, not command arguments.
+      export GH_CONFIG_DIR="${GH_CONFIG_DIR:-${LINK_BOT_TOOL_HOME:-${CODEX_HOME:-/home/codex/.codex}/tool-home}/gh}"
+      exec "$real_git" \
+        -c 'url.https://github.com/.insteadOf=git@github.com:' \
+        -c 'url.https://github.com/.insteadOf=ssh://git@github.com/' \
+        -c 'credential.https://github.com.helper=' \
+        -c 'credential.https://github.com.helper=!gh auth git-credential' "$@"
+    fi
+    ;;
+esac
+
+exec "$real_git" "$@"

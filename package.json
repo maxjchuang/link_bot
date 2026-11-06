@@ -1,0 +1,47 @@
+{
+  "name": "link-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "preview:task-cards": "npm run build && node scripts/preview-task-cards.mjs",
+    "test": "vitest run",
+    "test:app-server-schema": "node scripts/check-app-server-schema.mjs",
+    "test:turn-detail-stress": "npm run build && node scripts/check-turn-detail-stress.mjs",
+    "livecards:rollback": "node scripts/rollback-live-cards.mjs",
+    "test:app-server-maintenance-smoke": "npm run build && node scripts/smoke-app-server-maintenance.mjs",
+    "test:watch": "vitest",
+    "start": "node dist/src/index.js",
+    "dev": "tsx src/index.ts",
+    "feishu:openid": "node scripts/get-feishu-openid.mjs",
+    "runtime:build": "node scripts/runtime-image.mjs build",
+    "runtime:verify": "node scripts/runtime-image.mjs verify",
+    "pm2:launch:linux": "node scripts/launch-pm2-linux.mjs",
+    "pm2:startup:dry-run": "node scripts/setup-pm2-startup.mjs --dry-run",
+    "pm2:startup:install": "node scripts/setup-pm2-startup.mjs",
+    "pm2:startup:uninstall": "node scripts/setup-pm2-startup.mjs --uninstall"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.49.0",
+    "better-sqlite3": "^11.10.0",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^20.17.0",
+    "@types/qrcode": "^1.5.6",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^4.1.11"
+  },
+  "engines": {
+    "node": ">=22 <23"
+  },
+  "author": "maxjchuang <maxhjc549@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/maxjchuang/link_bot.git"
+  },
+  "description": "Connect chat platforms with general-purpose AI agents."
+}

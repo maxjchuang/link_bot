@@ -1,0 +1,217 @@
+{
+  "feishu": {
+    "appId": "cli_your_feishu_app_id",
+    "appSecret": "your_feishu_app_secret"
+  },
+  "restrictUsers": true,
+  "allowUnlistedGroupUsers": false,
+  "restrictChatIds": true,
+  "allowedUsers": [
+    "ou_allowed_user_open_id"
+  ],
+  "gitIdentities": {
+    "ou_allowed_user_open_id": {
+      "name": "Your Name",
+      "email": "your.name@example.com"
+    }
+  },
+  "allowedChatIds": [
+    "oc_allowed_chat_id"
+  ],
+  "hostControl": {
+    "enabled": false,
+    "adminUsers": [],
+    "projectId": "link-bot",
+    "socketPath": ".link-bot/host-control.sock",
+    "managerProcessName": "link-bot-host-manager"
+  },
+  "projects": [
+    {
+      "id": "link-bot",
+      "name": "Link Bot",
+      "path": "/absolute/path/to/your/project",
+      "repositoryPath": "your-namespace/link-bot",
+      "sandboxCloneUrl": "https://github.com/your-account/your-project.git",
+      "baseRef": "main",
+      "description": "Example project",
+      "instructions": [
+        "Run npm test before publishing"
+      ],
+      "access": {
+        "allowedUsers": [
+          "ou_allowed_user_open_id"
+        ],
+        "allowedChats": [
+          "oc_allowed_chat_id"
+        ],
+        "knowledgeApprovers": [
+          "ou_admin_open_id"
+        ]
+      },
+      "codexArgs": []
+    }
+  ],
+  "output": {
+    "directMaxChars": 1800,
+    "chunkSize": 1500
+  },
+  "codex": {
+    "command": "codex",
+    "defaultArgs": [
+      "--sandbox",
+      "danger-full-access",
+      "--ask-for-approval",
+      "never"
+    ],
+    "isolateSessions": true,
+    "executionProfiles": {
+      "host": {
+        "model": "gpt-6.1-sol",
+        "reasoningEffort": "medium",
+        "serviceTier": "default"
+      },
+      "worker": {
+        "model": "gpt-6.1-sol",
+        "reasoningEffort": "medium",
+        "serviceTier": "default"
+      }
+    }
+  },
+  "runtime": {
+    "backend": "app-server",
+    "image": "link-bot-runtime:0.1",
+    "codexCliVersion": "0.161.0",
+    "socketRoot": ".link-bot/task-sockets",
+    "statePath": ".link-bot/task-platform.sqlite",
+    "stagingRoot": ".link-bot/task-staging",
+    "taskCpuLimit": 4,
+    "taskMemoryLimitBytes": 8589934592,
+    "taskPidLimit": 512,
+    "taskTmpfsLimitBytes": 2147483648,
+    "taskNetwork": "bridge",
+    "isolationVerified": false,
+    "sharedAuthRiskAccepted": false,
+    "nativeGitExecution": false,
+    "managerGitToolFallback": true
+  },
+  "userSandboxes": {
+    "enabled": true,
+    "enabledOwners": [],
+    "legacyFallbackEnabled": true,
+    "maxAppServersPerUser": 8,
+    "maxActiveTurnsPerUser": 4,
+    "processIdleTimeoutMinutes": 120,
+    "containerIdleTimeoutMinutes": 1440,
+    "containerWrapperRetentionHours": 24
+  },
+  "taskPool": {
+    "maxHotTasks": 6,
+    "maxActiveTurns": 4,
+    "memoryHighWatermark": 0.8,
+    "memoryLowWatermark": 0.65,
+    "safetyReserveBytes": 2147483648,
+    "idleMemorySampleWindowDays": 7
+  },
+  "readyPool": {
+    "enabled": true,
+    "defaultMinReady": 1,
+    "defaultMaxReady": 2
+  },
+  "diskPolicy": {
+    "enabled": true,
+    "filesystemPath": "/var/lib/docker",
+    "scanIntervalMs": 900000,
+    "inventoryIntervalMs": 21600000,
+    "inventoryTimeoutMs": 300000,
+    "warningWatermark": 0.7,
+    "highWatermark": 0.8,
+    "lowWatermark": 0.65,
+    "minimumFreeBytes": 21474836480,
+    "attributionEnabled": true,
+    "cleanupEnabled": true,
+    "taskSoftLimitBytes": 21474836480,
+    "userSoftLimitBytes": 107374182400,
+    "warmRetentionDays": 7,
+    "warmRetentionWarningDays": 3,
+    "autoDeleteWarmTasks": false,
+    "maxCleanupTasksPerPass": 5,
+    "maxCleanupCandidatesScannedPerPass": 100,
+    "orphanGraceHours": 24
+  },
+  "memory": {
+    "catalogMaxTokens": 1000,
+    "automaticRecallMaxTokens": 1500,
+    "singleReadMaxTokens": 1500,
+    "totalContextRatio": 0.1
+  },
+  "conversationContext": {
+    "enabled": false,
+    "group": {
+      "maxMessages": 50,
+      "lookbackHours": 24,
+      "maxChars": 16000
+    },
+    "topic": {
+      "maxMessages": 100,
+      "maxChars": 20000
+    },
+    "requestTimeoutMs": 5000,
+    "incremental": true,
+    "includeMediaPlaceholders": true
+  },
+  "dream": {
+    "enabled": false,
+    "timezone": "Asia/Shanghai",
+    "startAfter": "02:00",
+    "maxConcurrency": 1,
+    "maxInteractiveActiveTurns": 2,
+    "batchMaxEvents": 100,
+    "batchMaxChars": 24000,
+    "administratorIds": []
+  },
+  "taskPlatformRollout": {
+    "enabled": true,
+    "enabledOwners": [],
+    "enabledProjects": [],
+    "appServerDefault": true,
+    "multiUserEnabled": false,
+    "conversationScopedTasks": true,
+    "multiRepositoryTasks": false,
+    "projectlessWorkspaces": true,
+    "projectSwitchingEnabled": false,
+    "projectContinuationInputHandoffEnabled": true,
+    "managedMemory": false,
+    "automaticContextRotation": false,
+    "nightlyDream": false,
+    "botGlobalMemory": false
+  },
+  "ui": {
+    "verbosity": "normal",
+    "currentRenderMode": "code",
+    "timeZone": "Asia/Shanghai"
+  },
+  "sensitiveReplyDeliveryEnabled": true,
+  "liveCards": {
+    "enabled": true,
+    "inlineTimelineMaxItems": 50,
+    "refreshIntervalMs": 1000
+  },
+  "upgrade": {
+    "enabled": false,
+    "adminUsers": [],
+    "pm2ProcessName": "link-bot",
+    "remote": "origin",
+    "branch": "main"
+  },
+  "pm2LogRotation": {
+    "enabled": true,
+    "maxSize": "100M",
+    "retain": 7,
+    "compress": true,
+    "dateFormat": "YYYY-MM-DD_HH-mm-ss",
+    "workerInterval": 30,
+    "rotateInterval": "0 0 * * *",
+    "rotateModule": true
+  },
+  "logLevel": "info"
+}

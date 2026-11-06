@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.link-bot/
+.superpowers/
+.worktrees/
+docs/superpowers/plans/
+*.log
+runtime/generated-skills/
+
+.DS_Store
+.env
+.env.*
+!.env.example
+config.json
+config.local.json
+*.pem
+*.key

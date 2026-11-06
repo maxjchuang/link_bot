@@ -1,0 +1,21 @@
+#!/bin/sh
+action="$1"
+shift || true
+
+case "$action" in
+  restart|stop|delete|reload)
+    for argument in "$@"; do
+      if [ "$argument" = "link-bot-host-manager" ]; then
+        echo "Protected process: use npm run pm2:launch:linux so restart is deferred until the active turn and card are finalized." >&2
+        exit 64
+      fi
+    done
+    ;;
+esac
+
+if [ -z "$LINK_BOT_REAL_PM2" ] || [ ! -x "$LINK_BOT_REAL_PM2" ]; then
+  echo "LINK_BOT_REAL_PM2 is not configured." >&2
+  exit 69
+fi
+
+exec "$LINK_BOT_REAL_PM2" "$action" "$@"
