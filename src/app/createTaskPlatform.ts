@@ -1,3 +1,4 @@
+import { DockerDaemonResourceSampler } from '../runtime/DockerDaemonResourceSampler.js';
 import { createHash } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -195,11 +196,12 @@ export function createTaskPlatform(input: CreateTaskPlatformInput): TaskPlatform
   const legacyProvisioner = new DockerTaskProvisioner(docker, credentialManager, stagingRoot, managerGit, input.dependencies?.waitForSocket, input.config.readyPool.enabled ? readyPool : undefined, input.config.readyPool.enabled ? readyRuntime : undefined, input.config.diskPolicy.enabled ? diskLifecycle : undefined, new GitIdentityResolver(input.config.gitIdentities), runtimeConfig.nativeGitExecution ?? false, input.config.projects
   );
   const userSandboxConfig = input.config.userSandboxes ?? {
-    enabled: false, enabledOwners: [], legacyFallbackEnabled: true,
+    enabled: true, enabledOwners: [], legacyFallbackEnabled: false, transport: 'auto' as const,
     maxAppServersPerUser: 8, maxActiveTurnsPerUser: 4, processIdleTimeoutMinutes: 120,
     containerIdleTimeoutMinutes: 1_440, containerWrapperRetentionHours: 24,
   };
   const userSandboxDocker = new UserSandboxDockerRuntime({
+    transport: userSandboxConfig.transport,
     image: runtimeConfig.image ?? 'link-bot-runtime:0.1',
     bridgeRoot: join(tmpdir(), `cb-user-${process.getuid?.() ?? 'service'}`),
     cpuLimit: runtimeConfig.taskCpuLimit ?? 4,
@@ -328,7 +330,8 @@ export function createTaskPlatform(input: CreateTaskPlatformInput): TaskPlatform
   }), 300_000, clock);
   const resources = new ResourceController(
     store,
-    input.dependencies?.hostSampler ?? new SystemHostResourceSampler(),
+    input.dependencies?.hostSampler ?? (process.platform === 'darwin'
+      ? new DockerDaemonResourceSampler(dockerRunner) : new SystemHostResourceSampler()),
     {
       gracefulStop: async (task) => {
         await backend.stopTask(task.id).catch(() => undefined);

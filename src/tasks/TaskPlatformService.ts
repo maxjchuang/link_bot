@@ -1634,10 +1634,12 @@ Retry the original business operation directly. Do not start another authorizati
       if (conversation && this.conversationTasks.shouldStartSuccessor(input)) {
         await this.createTask({ ...input, projectId: conversation.task.projectId });
       } else if (!conversation?.task.codexThreadId) {
+        const retryChatInitialization = conversation && taskMode(conversation.task) === 'chat'
+          && !conversation.task.codexThreadId;
         const newChatTopic = !conversation && this.config.taskPlatformRollout.projectFreeChat
           && input.chatType === 'group' && Boolean(input.topicId)
           && userSandboxEnabledFor(this.config, input.userId, input.taskPurpose);
-        if (newChatTopic) {
+        if (retryChatInitialization || newChatTopic) {
           await this.createTask({ ...input, mode: 'chat' });
         } else {
           const routing = await this.inferInitialProject(input);
@@ -4981,8 +4983,7 @@ export function isCodexRefreshTokenFailure(value: unknown): boolean {
 function userSandboxEnabledFor(config: BotConfig, ownerUserId: string, taskPurpose?: string): boolean {
   const rollout = config.userSandboxes;
   return Boolean(
-    !taskPurpose
-    && rollout?.enabled
+    rollout?.enabled
     && (rollout.enabledOwners.length === 0 || rollout.enabledOwners.includes(ownerUserId))
 ,
   );

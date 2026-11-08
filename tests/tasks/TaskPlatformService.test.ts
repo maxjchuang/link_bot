@@ -38,6 +38,25 @@ import { sampleConfig } from '../helpers/fakes.js';
 import { createTmpDir } from '../helpers/tmp.js';
 
 describe('TaskPlatformService', () => {
+  it('retries an uninitialized chat task without silently binding it to a project', async () => {
+    const h = await createHarness(undefined, true, true);
+    h.config.userSandboxes = { enabled: true, enabledOwners: [], legacyFallbackEnabled: false,
+      maxAppServersPerUser: 8, maxActiveTurnsPerUser: 1, processIdleTimeoutMinutes: 120,
+      containerIdleTimeoutMinutes: 1440, containerWrapperRetentionHours: 24 };
+    h.config.taskPlatformRollout.projectFreeChat = true;
+    vi.spyOn(h.backend, 'startTask').mockRejectedValueOnce(new Error('fixture transient startup failure'));
+    const input = message('hello', { chatType: 'group', chatId: 'oc_group', threadId: 'topic_chat_retry', wasMentioned: true, messageId: 'om_first' });
+    await expect(h.controller.handleMessage(input)).rejects.toThrow('fixture transient startup failure');
+    const task = h.store.listTasks()[0]!;
+    expect(task.mode).toBe('chat');
+    await h.controller.handleMessage({ ...input, messageId: 'om_second' });
+    const retried = h.store.getTask(task.id)!;
+    expect(retried.mode).toBe('chat');
+    expect(retried.projectId).toBeUndefined();
+    expect(h.store.listTaskRepositories(task.id)).toEqual([]);
+    await h.stop(task.id);
+  });
+
   it.each([true, false])('privately delivers hidden content before final publication without leaking to results/events/outbox (live card=%s)', async (liveCard) => {
     const root = await createTmpDir();
     const send = vi.fn(async () => ({ messageId: 'private-receipt' }));

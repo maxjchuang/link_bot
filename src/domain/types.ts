@@ -88,6 +88,7 @@ export interface RuntimeConfig {
 }
 
 export interface UserSandboxesConfig {
+  transport?: 'auto' | 'unix-socket' | 'docker-exec';
   enabled: boolean;
   enabledOwners: string[];
   legacyFallbackEnabled: boolean;

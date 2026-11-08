@@ -285,7 +285,7 @@ describe('UserSandboxDockerRuntime', () => {
 
 function config(bridgeRoot: string) {
   return {
-    image: 'link-bot-runtime:test', bridgeRoot, cpuLimit: 4, memoryLimitBytes: 8_589_934_592,
+    image: 'link-bot-runtime:test', transport: 'unix-socket' as const, bridgeRoot, cpuLimit: 4, memoryLimitBytes: 8_589_934_592,
     pidLimit: 512, tmpfsLimitBytes: 268_435_456, network: 'bridge', maxAppServersPerUser: 8,
     hostUid: 1001, hostGid: 1001,
     authFile: '/protected/codex-auth.json',

@@ -1,3 +1,4 @@
+import { dockerSandboxEndpoint, parseDockerSandboxEndpoint, resolveSandboxTransport, sandboxControlSocketPath, type SandboxTransportMode } from './SandboxSocketTransport.js';
 import { createHash } from 'node:crypto';
 import { chmod,mkdir,open,rm,stat } from 'node:fs/promises';
 import { basename,join } from 'node:path';
@@ -10,6 +11,7 @@ const USER_SANDBOX_RUNTIME_SPEC = '7';
 
 export interface UserSandboxDockerConfig {
   image: string;
+  transport?: SandboxTransportMode;
   bridgeRoot: string;
   cpuLimit: number;
   memoryLimitBytes: number;
@@ -83,7 +85,9 @@ export class UserSandboxDockerRuntime {
       codexVolume: `${prefix}-codex`,
       agentsVolume: `${prefix}-agents`,
       bridgeDirectory,
-      supervisorSocketPath: join(bridgeDirectory, 'supervisor.sock'),
+      supervisorSocketPath: resolveSandboxTransport(this.config.transport) === 'docker-exec'
+        ? dockerSandboxEndpoint(`${prefix}-g${record.generation}`, sandboxControlSocketPath())
+        : join(bridgeDirectory, 'supervisor.sock'),
       ...(record.containerId ? { containerId: record.containerId } : {}),
       image: record.runtimeImage ?? this.config.image,
     };
@@ -341,7 +345,8 @@ export class UserSandboxDockerRuntime {
       '--mount', `type=volume,src=${runtime.homeVolume},dst=/home/codex`,
       '--mount', `type=volume,src=${runtime.codexVolume},dst=/home/codex/.codex`,
       '--mount', `type=volume,src=${runtime.agentsVolume},dst=/home/codex/.agents`,
-      '--mount', `type=bind,src=${runtime.bridgeDirectory},dst=/run/link-bot/bridge`,
+      ...(resolveSandboxTransport(this.config.transport) === 'unix-socket'
+        ? ['--mount', `type=bind,src=${runtime.bridgeDirectory},dst=/run/link-bot/bridge`] : []),
       ...(this.config.authFile ? [
         '--env', 'LINK_BOT_AUTH_FILE=/run/link-bot-auth.json',
         '--mount', `type=bind,src=${this.config.authFile},dst=/run/link-bot-auth.json,readonly`,
@@ -448,8 +453,13 @@ async function waitForSocket(path: string): Promise<void> {
   const deadline = Date.now() + 60_000;
   for (;;) {
     try {
-      const info = await stat(path);
-      if (info.isSocket()) return;
+      if (parseDockerSandboxEndpoint(path)) {
+        const health = await new SandboxSupervisorClient(path, 2_000).health();
+        if (health.status === 'ready') return;
+      } else {
+        const info = await stat(path);
+        if (info.isSocket()) return;
+      }
     } catch {}
     if (Date.now() >= deadline) throw new Error(`Timed out waiting for user sandbox Supervisor socket: ${path}`);
     await new Promise((resolve) => setTimeout(resolve, 50));

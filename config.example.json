@@ -97,12 +97,13 @@
   "userSandboxes": {
     "enabled": true,
     "enabledOwners": [],
-    "legacyFallbackEnabled": true,
+    "legacyFallbackEnabled": false,
     "maxAppServersPerUser": 8,
     "maxActiveTurnsPerUser": 4,
     "processIdleTimeoutMinutes": 120,
     "containerIdleTimeoutMinutes": 1440,
-    "containerWrapperRetentionHours": 24
+    "containerWrapperRetentionHours": 24,
+    "transport": "auto"
   },
   "taskPool": {
     "maxHotTasks": 6,
@@ -113,7 +114,7 @@
     "idleMemorySampleWindowDays": 7
   },
   "readyPool": {
-    "enabled": true,
+    "enabled": false,
     "defaultMinReady": 1,
     "defaultMaxReady": 2
   },
@@ -176,14 +177,15 @@
     "appServerDefault": true,
     "multiUserEnabled": false,
     "conversationScopedTasks": true,
-    "multiRepositoryTasks": false,
+    "multiRepositoryTasks": true,
     "projectlessWorkspaces": true,
     "projectSwitchingEnabled": false,
     "projectContinuationInputHandoffEnabled": true,
     "managedMemory": false,
     "automaticContextRotation": false,
     "nightlyDream": false,
-    "botGlobalMemory": false
+    "botGlobalMemory": false,
+    "projectFreeChat": true
   },
   "ui": {
     "verbosity": "normal",

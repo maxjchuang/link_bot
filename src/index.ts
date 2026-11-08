@@ -53,6 +53,10 @@ export async function bootstrap(deps: BootstrapDeps = {}): Promise<void> {
   const config = await loadConfigFn(projectRoot);
   const userWhitelistManager = deps.userWhitelistManager ?? new UserWhitelistManager(projectRoot, config);
   if (!config.taskPlatformRollout.enabled) throw new Error('The App Server task platform must be enabled.');
+  if (!config.userSandboxes?.enabled || config.userSandboxes.legacyFallbackEnabled
+    || config.userSandboxes.enabledOwners.length > 0 || config.readyPool.enabled) {
+    throw new Error('User Sandbox must be enabled for all authorized owners with legacy fallback and task ready pool disabled.');
+  }
   const logger = createAppLogger({ level: config.logLevel, sink: deps.logger ?? console });
   const store = createStoreFn(projectRoot);
   const codexHomeInit = await initializeProjectCodexHome({ projectRoot });

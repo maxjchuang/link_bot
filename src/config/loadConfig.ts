@@ -326,10 +326,13 @@ export async function loadConfig(projectRoot: string): Promise<BotConfig> {
 }
 
 function normalizeUserSandboxes(record: Record<string, unknown>): NonNullable<BotConfig['userSandboxes']> {
+  const transport = record.transport ?? 'auto';
+  if (!['auto', 'unix-socket', 'docker-exec'].includes(String(transport))) throw new Error('Invalid config field: userSandboxes.transport');
   return {
-    enabled: optionalBoolean(record.enabled, false, 'userSandboxes.enabled'),
+    transport: transport as 'auto' | 'unix-socket' | 'docker-exec',
+    enabled: optionalBoolean(record.enabled, true, 'userSandboxes.enabled'),
     enabledOwners: optionalStringArray(record.enabledOwners, 'userSandboxes.enabledOwners'),
-    legacyFallbackEnabled: optionalBoolean(record.legacyFallbackEnabled, true, 'userSandboxes.legacyFallbackEnabled'),
+    legacyFallbackEnabled: optionalBoolean(record.legacyFallbackEnabled, false, 'userSandboxes.legacyFallbackEnabled'),
     maxAppServersPerUser: optionalPositiveInteger(record.maxAppServersPerUser, 8, 'userSandboxes.maxAppServersPerUser'),
     maxActiveTurnsPerUser: optionalPositiveInteger(record.maxActiveTurnsPerUser, 4, 'userSandboxes.maxActiveTurnsPerUser'),
     processIdleTimeoutMinutes: optionalPositiveInteger(record.processIdleTimeoutMinutes, 120, 'userSandboxes.processIdleTimeoutMinutes'),
@@ -534,7 +537,7 @@ function normalizeTaskPool(record: Record<string, unknown>): BotConfig['taskPool
 
 function normalizeReadyPool(record: Record<string, unknown>): BotConfig['readyPool'] {
   const config: BotConfig['readyPool'] = {
-    enabled: optionalBoolean(record.enabled, true, 'readyPool.enabled'),
+    enabled: optionalBoolean(record.enabled, false, 'readyPool.enabled'),
     defaultMinReady: optionalNonnegativeInteger(record.defaultMinReady, 1, 'readyPool.defaultMinReady'),
     defaultMaxReady: optionalNonnegativeInteger(record.defaultMaxReady, 2, 'readyPool.defaultMaxReady'),
   };

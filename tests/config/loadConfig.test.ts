@@ -167,7 +167,7 @@ describe('loadConfig', () => {
 
     await expect(loadConfig(root)).resolves.toMatchObject({
       userSandboxes: {
-        enabled: true, enabledOwners: ['ou_1'], legacyFallbackEnabled: true,
+        enabled: true, enabledOwners: ['ou_1'], legacyFallbackEnabled: false,
         maxAppServersPerUser: 8, maxActiveTurnsPerUser: 4,
         processIdleTimeoutMinutes: 120, containerIdleTimeoutMinutes: 1_440,
         containerWrapperRetentionHours: 24,
@@ -262,7 +262,7 @@ describe('loadConfig', () => {
     await expect(loadConfig(root)).rejects.toThrow('Invalid config field: projects[].runtimeBackend');
   });
 
-  it('loads the agreed task-pool and READY defaults', async () => {
+  it('loads task-pool defaults with the per-task ready pool disabled', async () => {
     const root = await createTmpDir();
     await writeConfig(root, validConfig());
 
@@ -271,7 +271,7 @@ describe('loadConfig', () => {
         maxHotTasks: 6, maxActiveTurns: 4, memoryHighWatermark: 0.8, memoryLowWatermark: 0.65,
         safetyReserveBytes: 2_147_483_648, idleMemorySampleWindowDays: 7,
       },
-      readyPool: { enabled: true, defaultMinReady: 1, defaultMaxReady: 2 },
+      readyPool: { enabled: false, defaultMinReady: 1, defaultMaxReady: 2 },
       diskPolicy: {
         enabled: false, filesystemPath: '/var/lib/docker', scanIntervalMs: 900_000, inventoryIntervalMs: 21_600_000,
         inventoryTimeoutMs: 300_000,
@@ -825,4 +825,20 @@ describe('loadConfig', () => {
 
     await expect(loadConfig(root)).rejects.toThrow('Invalid config field: logLevel');
   });
+});
+
+
+it('ships an internally consistent User Sandbox example configuration', async () => {
+  const root = await createTmpDir();
+  const example = JSON.parse(await (await import('node:fs/promises')).readFile('config.example.json', 'utf8'));
+  await writeConfig(root, example);
+  const loaded = await loadConfig(root);
+  expect(loaded.userSandboxes).toMatchObject({ enabled: true, enabledOwners: [], legacyFallbackEnabled: false, transport: 'auto' });
+  expect(loaded.readyPool.enabled).toBe(false);
+  expect(loaded.taskPlatformRollout).toMatchObject({ projectlessWorkspaces: true, multiRepositoryTasks: true, conversationScopedTasks: true });
+});
+
+it('rejects an unsupported User Sandbox transport', async () => {
+  const root = await createTmpDir(); await writeConfig(root, validConfig({ userSandboxes: { transport: 'public-tcp' } }));
+  await expect(loadConfig(root)).rejects.toThrow('userSandboxes.transport');
 });

@@ -1,4 +1,5 @@
-import { createConnection } from 'node:net';
+import { createSandboxConnection } from '../runtime/SandboxSocketTransport.js';
+import type { Duplex } from 'node:stream';
 import type { StartTaskInput } from '../backends/CodexBackend.js';
 import { SandboxSupervisorClient, type SupervisorTaskSnapshot } from '../runtime/SandboxSupervisorClient.js';
 import { AppServerConnection } from './AppServerConnection.js';
@@ -113,9 +114,9 @@ async function startTaskWithSupervisorStartupRetry(
   }
 }
 
-function connectTaskSocket(path: string, timeoutMs: number): Promise<ReturnType<typeof createConnection>> {
+function connectTaskSocket(path: string, timeoutMs: number): Promise<Duplex> {
   return new Promise((resolve, reject) => {
-    const socket = createConnection(path);
+    const socket = createSandboxConnection(path);
     const timeout = setTimeout(() => {
       socket.destroy();
       reject(new Error(`Timed out connecting to User Sandbox task socket: ${path}`));

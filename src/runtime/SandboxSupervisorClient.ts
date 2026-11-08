@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { createConnection } from 'node:net';
+import { createSandboxConnection, dockerSandboxEndpoint, parseDockerSandboxEndpoint, type SandboxSocketConnector } from './SandboxSocketTransport.js';
 import { basename, dirname, join } from 'node:path';
 import type { SandboxRepoRequest, SandboxRepoResult } from '../projects/SandboxRepositoryCreationTypes.js';
 
@@ -37,6 +37,7 @@ export class SandboxSupervisorClient {
   constructor(
     private readonly controlSocketPath: string,
     private readonly timeoutMs = 10_000,
+    private readonly connect: SandboxSocketConnector = createSandboxConnection,
   ) {}
 
   async startTask(input: {
@@ -124,7 +125,8 @@ export class SandboxSupervisorClient {
 
   private withHostSocket(value: Record<string, unknown>): SupervisorTaskSnapshot {
     const socketPath = requireString(value.socketPath, 'task socket path');
-    const hostTaskRoot = join(dirname(this.controlSocketPath), 'tasks');
+    const dockerTarget = parseDockerSandboxEndpoint(this.controlSocketPath);
+    const hostTaskRoot = join(dirname(dockerTarget?.socketPath ?? this.controlSocketPath), 'tasks');
     if (!socketPath.startsWith('/run/link-bot/bridge/tasks/') && dirname(socketPath) !== hostTaskRoot) {
       throw new Error('Supervisor returned a task socket outside the bridge root.');
     }
@@ -134,7 +136,7 @@ export class SandboxSupervisorClient {
       sandboxGeneration: requireGeneration(value.sandboxGeneration, 'sandbox generation'),
       processGeneration: requireGeneration(value.processGeneration, 'process generation'),
       socketPath,
-      hostSocketPath: join(hostTaskRoot, basename(socketPath)),
+      hostSocketPath: dockerTarget ? dockerSandboxEndpoint(dockerTarget.containerName, socketPath) : join(hostTaskRoot, basename(socketPath)),
       status: requireTaskStatus(value.status),
     } as SupervisorTaskSnapshot;
   }
@@ -142,7 +144,7 @@ export class SandboxSupervisorClient {
   private request<T extends object>(method: string, params: Record<string, unknown>, timeoutMs = this.timeoutMs): Promise<T> {
     const id = randomUUID();
     return new Promise<T>((resolve, reject) => {
-      const socket = createConnection(this.controlSocketPath);
+      const socket = this.connect(this.controlSocketPath);
       let response = '';
       let settled = false;
       const finish = (operation: () => void) => {

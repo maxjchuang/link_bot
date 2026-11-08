@@ -15,6 +15,10 @@ async function harness() {
   const root = await createTmpDir();
   const config = sampleConfig(root);
   config.taskPlatformRollout.enabled = true;
+  config.readyPool.enabled = false;
+  config.userSandboxes = { enabled: true, enabledOwners: [], legacyFallbackEnabled: false,
+    maxAppServersPerUser: 8, maxActiveTurnsPerUser: 1, processIdleTimeoutMinutes: 120,
+    containerIdleTimeoutMinutes: 1440, containerWrapperRetentionHours: 24 };
   let messageHandler: Parameters<FeishuGateway['start']>[0];
   let cardHandler: Parameters<FeishuGateway['start']>[1];
   const gateway = {
@@ -50,6 +54,11 @@ describe('App Server-only startup', () => {
   it('does not start a fallback execution path when the task platform is disabled', async () => {
     const h = await harness(); h.config.taskPlatformRollout.enabled = false;
     await expect(bootstrap(h.dependencies)).rejects.toThrow('App Server task platform must be enabled');
+    expect(h.gateway.start).not.toHaveBeenCalled();
+  });
+  it('refuses a per-task container fallback before starting the gateway', async () => {
+    const h = await harness(); h.config.userSandboxes!.legacyFallbackEnabled = true;
+    await expect(bootstrap(h.dependencies)).rejects.toThrow('User Sandbox must be enabled');
     expect(h.gateway.start).not.toHaveBeenCalled();
   });
   it('checks the current allowlist before routing any card action', async () => {

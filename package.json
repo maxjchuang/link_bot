@@ -12,7 +12,7 @@
     "livecards:rollback": "node scripts/rollback-live-cards.mjs",
     "test:app-server-maintenance-smoke": "npm run build && node scripts/smoke-app-server-maintenance.mjs",
     "test:watch": "vitest",
-    "start": "node dist/src/index.js",
+    "start": "bash scripts/run-local.sh",
     "dev": "tsx src/index.ts",
     "feishu:openid": "node scripts/get-feishu-openid.mjs",
     "runtime:build": "node scripts/runtime-image.mjs build",
@@ -20,7 +20,15 @@
     "pm2:launch:linux": "node scripts/launch-pm2-linux.mjs",
     "pm2:startup:dry-run": "node scripts/setup-pm2-startup.mjs --dry-run",
     "pm2:startup:install": "node scripts/setup-pm2-startup.mjs",
-    "pm2:startup:uninstall": "node scripts/setup-pm2-startup.mjs --uninstall"
+    "pm2:startup:uninstall": "node scripts/setup-pm2-startup.mjs --uninstall",
+    "doctor": "bash scripts/run-local.sh --check",
+    "start:local": "bash scripts/run-local.sh",
+    "setup:feishu": "node scripts/setup-feishu-allowlist.mjs",
+    "auth:reuse": "node scripts/reuse-codex-auth.mjs",
+    "start:background": "bash scripts/run-local.sh --background",
+    "stop:local": "node scripts/local-service.mjs stop",
+    "status:local": "node scripts/local-service.mjs status",
+    "test:user-sandbox-smoke": "npm run build && node scripts/smoke-user-sandbox.mjs"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.49.0",

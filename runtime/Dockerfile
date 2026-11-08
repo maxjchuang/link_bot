@@ -1,4 +1,5 @@
-FROM node:22.21.1-bookworm-slim
+ARG NODE_BASE_IMAGE=node:22.21.1-bookworm-slim
+FROM ${NODE_BASE_IMAGE}
 
 ARG CODEX_CLI_VERSION=0.161.0
 ARG LARK_CLI_VERSION=1.0.94
@@ -11,12 +12,16 @@ RUN apt-get update \
     && npm cache clean --force
 
 ARG GH_CLI_VERSION=2.102.0
-ARG GH_CLI_SHA256=bb766f710eef8ede859c18578c72c327597cd4c8a85b06001b1f3843c6019386
-RUN curl --fail --silent --show-error --location --output /tmp/gh.tar.gz \
-      "https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/gh_${GH_CLI_VERSION}_linux_amd64.tar.gz" \
-    && echo "${GH_CLI_SHA256}  /tmp/gh.tar.gz" | sha256sum --check \
+ARG GH_CLI_SHA256_AMD64=bb766f710eef8ede859c18578c72c327597cd4c8a85b06001b1f3843c6019386
+ARG GH_CLI_SHA256_ARM64=7862c86c72f43df3a2d93ddde6f473285b4e2af61b494849846827e513ef6484
+ARG TARGETARCH
+RUN arch="${TARGETARCH:-$(dpkg --print-architecture)}" \
+    && case "$arch" in amd64) checksum="$GH_CLI_SHA256_AMD64" ;; arm64) checksum="$GH_CLI_SHA256_ARM64" ;; *) exit 64 ;; esac \
+    && curl --fail --silent --show-error --location --output /tmp/gh.tar.gz \
+      "https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/gh_${GH_CLI_VERSION}_linux_${arch}.tar.gz" \
+    && echo "${checksum}  /tmp/gh.tar.gz" | sha256sum --check \
     && tar -xzf /tmp/gh.tar.gz --strip-components=2 -C /usr/local/bin \
-      "gh_${GH_CLI_VERSION}_linux_amd64/bin/gh" \
+      "gh_${GH_CLI_VERSION}_linux_${arch}/bin/gh" \
     && chmod 0755 /usr/local/bin/gh \
     && gh --version | grep -F "gh version ${GH_CLI_VERSION}" \
     && rm -f /tmp/gh.tar.gz
@@ -27,13 +32,14 @@ ENV NPM_CONFIG_GLOBALCONFIG=/usr/local/etc/npmrc
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin codex \
     && mkdir -p /workspace /cache /run/link-bot /home/codex/.codex/tool-home/gh \
     && chmod 0700 /home/codex/.codex/tool-home /home/codex/.codex/tool-home/gh \
-    && chown -R codex:codex /workspace /cache /run/link-bot
+    && chown -R codex:codex /workspace /cache /run/link-bot /home/codex
 COPY defaults/AGENTS.md /opt/link-bot/defaults/AGENTS.md
 RUN mkdir -p /usr/local/libexec \
     && mv /usr/local/bin/lark-cli /usr/local/libexec/lark-cli
 COPY bin/lark-cli-wrapper /usr/local/bin/lark-cli
 COPY bin/link-bot-native-git-init /usr/local/bin/link-bot-native-git-init
 COPY bin/link-bot-sandbox-supervisor.mjs /usr/local/bin/link-bot-sandbox-supervisor
+COPY bin/link-bot-sandbox-bridge.mjs /usr/local/bin/link-bot-sandbox-bridge.mjs
 COPY bin/link-bot-codex-auth.mjs /usr/local/bin/link-bot-codex-auth.mjs
 COPY bin/link-bot-sandbox-repo-create.mjs /usr/local/bin/link-bot-sandbox-repo-create
 COPY bin/git-wrapper /usr/local/bin/git

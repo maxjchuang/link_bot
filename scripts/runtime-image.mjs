@@ -14,19 +14,26 @@ export function parseArgs(argv) {
   return options;
 }
 
-export async function runRuntimeImage({ args = process.argv.slice(2), projectRoot = process.cwd(), commandRunner = runCommand } = {}) {
+export async function runRuntimeImage({ args = process.argv.slice(2), projectRoot = process.cwd(), commandRunner = runCommand, env = process.env } = {}) {
   const options = parseArgs(args);
-  if (options.mode === 'build') await commandRunner('docker', ['build', '--pull', '-t', options.image, 'runtime'], { cwd: projectRoot });
+  const daemon = (await commandRunner('docker', ['info', '--format', '{{.OSType}}/{{.Architecture}}'], { cwd: projectRoot })).trim();
+  const platform = daemon.replace('aarch64', 'arm64').replace('x86_64', 'amd64');
+  if (!['linux/arm64', 'linux/amd64'].includes(platform)) throw new Error(`Unsupported Docker daemon platform: ${daemon}`);
+  if (options.mode === 'build') {
+    const base = env.LINK_BOT_NODE_BASE_IMAGE;
+    if (base && !/^(?:node|public\.ecr\.aws\/docker\/library\/node):[A-Za-z0-9._-]+(?:@sha256:[a-f0-9]{64})?$/.test(base)) throw new Error('Expected an official public Node base image.');
+    await commandRunner('docker', ['build', '--pull', '--platform', platform, ...(base ? ['--build-arg', `NODE_BASE_IMAGE=${base}`] : []), '-t', options.image, 'runtime'], { cwd: projectRoot });
+  }
   const dockerfile = await readFile(resolve(projectRoot, 'runtime/Dockerfile'), 'utf8');
   const expected = dockerfile.match(/^ARG CODEX_CLI_VERSION=(\S+)$/m)?.[1];
-  const actual = await commandRunner('docker', ['run', '--rm', '--entrypoint', 'codex', options.image, '--version'], { cwd: projectRoot });
+  const actual = await commandRunner('docker', ['run', '--platform', platform, '--rm', '--entrypoint', 'codex', options.image, '--version'], { cwd: projectRoot });
   if (!actual.includes(expected)) throw new Error(`Unexpected Codex version: ${actual.trim()}`);
   for (const binary of ['gh', 'lark-cli', 'git', 'python3']) {
-    await commandRunner('docker', ['run', '--rm', '--entrypoint', binary, options.image, '--version'], { cwd: projectRoot });
+    await commandRunner('docker', ['run', '--platform', platform, '--rm', '--entrypoint', binary, options.image, '--version'], { cwd: projectRoot });
   }
-  await commandRunner('docker', ['run', '--rm', '--entrypoint', 'sh', options.image, '-ec',
-    'test -x /usr/local/bin/link-bot-sandbox-supervisor && test -x /usr/local/bin/link-bot-sandbox-repo-create'], { cwd: projectRoot });
-  return { image: options.image, codexCliVersion: expected };
+  await commandRunner('docker', ['run', '--platform', platform, '--rm', '--entrypoint', 'sh', options.image, '-ec',
+    'test -x /usr/local/bin/link-bot-sandbox-supervisor && test -x /usr/local/bin/link-bot-sandbox-repo-create && test -f /usr/local/bin/link-bot-sandbox-bridge.mjs'], { cwd: projectRoot });
+  return { image: options.image, platform, codexCliVersion: expected };
 }
 
 function runCommand(command, args, options) {
