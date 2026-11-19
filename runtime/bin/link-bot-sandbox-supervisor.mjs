@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
 import { shouldReplaceCodexAuth } from './link-bot-codex-auth.mjs';
+import {repositoryKey,cloneFailure} from './git-repository-url.mjs';
 
 const bridgeRoot = process.env.LINK_BOT_BRIDGE_ROOT ?? '/run/link-bot/bridge';
 const controlSocket = join(bridgeRoot, 'supervisor.sock');
@@ -413,6 +414,8 @@ async function initializeProject(projectId, cloneUrl, baseRef) {
     const topLevel = await runProjectGit(['-C', cwd, 'rev-parse', '--show-toplevel']);
     if (topLevel.code === 0) {
       if (topLevel.stdout.trim() !== cwd) throw new Error('shared project is not a repository root');
+      const origin=await runProjectGit(['-C',cwd,'remote','get-url','origin']);
+      if(origin.code!==0||repositoryKey(origin.stdout.trim())!==repositoryKey(cloneUrl))throw new Error('project_origin_mismatch: existing worktree does not match configured repository');
       await rm(marker, { force: true });
       return { projectId, cwd, status: 'ready' };
     }
@@ -438,7 +441,8 @@ async function initializeProject(projectId, cloneUrl, baseRef) {
     }
   }
   if (!current) await rm(temporary, { recursive: true, force: true });
-  if (!isGitAuthFailure(cloned.stderr)) throw new Error('project clone failed; inspect sandbox Git access or base branch');
+  const failure=cloneFailure(cloned.stderr);
+  if(failure!=='project_authentication_required')throw new Error(`${failure}: verify the configured repository address, visibility, base branch and network; no binding was changed`);
   if (!current) await prepareOwnedDirectory(cwd, 0o700, taskUid, taskGid, 'project authentication workspace');
   await writeFile(marker, JSON.stringify({ projectId, cloneUrl, baseRef }), { mode: 0o600 });
   await chown(marker, taskUid, taskGid);
@@ -448,23 +452,6 @@ async function initializeProject(projectId, cloneUrl, baseRef) {
 function isProjectId(value) {
   return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(value)
     && !['tasks', '.linkbot'].includes(value) && !value.includes('..');
-}
-
-function repositoryKey(value) {
-  if (typeof value !== 'string') return undefined;
-  const ssh = /^git@(github\.com):([A-Za-z0-9._/-]+?)(?:\.git)?$/.exec(value);
-  if (ssh) return `${ssh[1]}/${ssh[2]}`.toLowerCase();
-  try {
-    const parsed = new URL(value);
-    if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash
-      || !['github.com'].includes(parsed.hostname)
-      || !/^\/[A-Za-z0-9._/-]+$/.test(parsed.pathname)) return undefined;
-    return `${parsed.hostname}${parsed.pathname.replace(/\.git$/, '')}`.toLowerCase();
-  } catch { return undefined; }
-}
-
-function isGitAuthFailure(stderr) {
-  return /permission denied|authentication failed|authorization failed|could not read username|publickey|auth_required|auth-003|repository not found/i.test(stderr);
 }
 
 function runProjectGit(args, timeoutMs = 15_000) {

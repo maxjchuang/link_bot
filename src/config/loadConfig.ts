@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import {repositoryKey} from '../git/RepositoryUrl.js';
 import { resolveInlineTimelineLimit } from '../details/InlineTimelineLimits.js';
 import type { BotConfig,ProjectConfig } from '../domain/types.js';
 import { parseLogLevel } from '../logging/AppLogger.js';
@@ -147,13 +148,7 @@ function requireRepositoryPath(value: unknown, field: string): string {
 
 function requireSandboxCloneUrl(value: unknown): string {
   const url = requireString(value, 'projects[].sandboxCloneUrl');
-  if (/^git@(?:github\.com):[A-Za-z0-9._/-]+(?:\.git)?$/.test(url)) return url;
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol === 'https:' && !parsed.username && !parsed.password
-      && ['github.com'].includes(parsed.hostname)
-      && /^\/[A-Za-z0-9._/-]+(?:\.git)?$/.test(parsed.pathname) && !parsed.search && !parsed.hash) return url;
-  } catch {}
+  if(repositoryKey(url))return url;
   throw new Error('Invalid config field: projects[].sandboxCloneUrl');
 }
 

@@ -1,4 +1,12 @@
 #!/bin/sh
 set -eu
 export GH_CONFIG_DIR="${GH_CONFIG_DIR:-${LINK_BOT_TOOL_HOME:-${CODEX_HOME:-/home/codex/.codex}/tool-home}/gh}"
-gh auth status >/dev/null
+repository=${1:-$(/usr/bin/git remote get-url origin 2>/dev/null || true)}
+if [ -z "$repository" ]; then
+  echo 'Explicit repository URL or an existing origin is required.' >&2
+  exit 64
+fi
+case "$repository" in
+  git@github.com:*|ssh://git@github.com/*|https://github.com/*) gh auth status >/dev/null ;;
+  *) /usr/local/bin/git ls-remote -- "$repository" HEAD >/dev/null ;;
+esac

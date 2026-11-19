@@ -45,6 +45,13 @@ describe('UserSandboxTaskProvisioner', () => {
     expect(legacyRefresh).toHaveBeenCalledWith(legacy);
     store.close();
   });
+  it('does not guess a host from repositoryPath during project binding',async()=>{
+    const store=new SqliteStateStore(join(await createTmpDir(),'state.sqlite'));
+    const task:TaskRecord={...sandboxTask('task_explicit_url'),mode:'chat',projectId:undefined,baseRef:'',branchName:''};store.saveTask(task);
+    const ensureProjectWorkspace=vi.fn();const provisioner=new UserSandboxTaskProvisioner(store,{ensureProjectWorkspace} as never);
+    await expect(provisioner.prepareProjectBinding(task,{id:'repo',name:'Repo',path:'',codexArgs:[],repositoryPath:'team/repo'})).rejects.toThrow('project_clone_url_required');
+    expect(ensureProjectWorkspace).not.toHaveBeenCalled();store.close();
+  });
   it('does not treat an auth-required empty project directory as checkout-ready', async () => {
     const store = new SqliteStateStore(join(await createTmpDir(), 'state.sqlite'));
     const task: TaskRecord = { ...sandboxTask('task_auth_bind'), mode: 'chat', projectId: undefined, baseRef: '', branchName: '' };
@@ -73,7 +80,7 @@ describe('UserSandboxTaskProvisioner', () => {
     const provisioner = new UserSandboxTaskProvisioner(store, { ensure, ensureProjectWorkspace } as never);
 
     await expect(provisioner.prepareProjectBinding(task, {
-      id: 'repo', name: 'Repo', path: '/repo', repositoryPath: 'team/repo', codexArgs: [], baseRef: 'develop',
+      id: 'repo', name: 'Repo', path: '/repo', repositoryPath: 'team/repo', sandboxCloneUrl:'git@github.com:team/repo.git', codexArgs: [], baseRef: 'develop',
     })).resolves.toMatchObject({ cwd: checkout, runtimeId: 'sandbox_1' });
     expect(ensureProjectWorkspace).toHaveBeenCalledWith('ou_1', {
       projectId: 'repo', cloneUrl: 'git@github.com:team/repo.git', baseRef: 'develop',
@@ -205,7 +212,7 @@ describe('UserSandboxTaskProvisioner', () => {
     const ensure = vi.fn(async () => ({ sandbox: { id: 'sandbox_1' } }));
     const ensureProjectWorkspace = vi.fn(async () => ({ projectId: 'repo', cwd: '/workspace/repo', status: 'ready' }));
     const provisioner = new UserSandboxTaskProvisioner(store, { ensure, ensureProjectWorkspace } as never);
-    const project = { id: 'repo', name: 'Repo', path: '/repo', repositoryPath: 'team/repo', codexArgs: [] };
+    const project = { id: 'repo', name: 'Repo', path: '/repo', repositoryPath: 'team/repo', sandboxCloneUrl:'git@github.com:team/repo.git', codexArgs: [] };
 
     const [one, two] = await Promise.all([first, second].map((task) => provisioner.provision({
       taskId: task.id, ownerUserId: task.ownerUserId, project,

@@ -3,6 +3,7 @@ import type { SqliteStateStore } from '../state/SqliteStateStore.js';
 import type { ProvisionedTaskRuntime,TaskRuntimeProvisioner } from '../tasks/TaskPlatformService.js';
 import { projectTask,taskMode,type TaskRecord,type TaskRuntimeState } from '../tasks/TaskTypes.js';
 import type { UserSandboxManager } from './UserSandboxManager.js';
+import {repositoryKey} from '../git/RepositoryUrl.js';
 
 export class UserSandboxTaskProvisioner implements Pick<
   TaskRuntimeProvisioner,
@@ -38,9 +39,7 @@ export class UserSandboxTaskProvisioner implements Pick<
     if (current.ownerUserId !== task.ownerUserId) {
       throw new Error('Only the owning task can prepare a project bind.');
     }
-    const cloneUrl = project.sandboxCloneUrl ?? (project.repositoryPath
-      ? `git@github.com:${project.repositoryPath}.git` : undefined);
-    if (!cloneUrl) throw new SandboxProjectBootstrapError(`Project ${project.id} has no sandbox clone URL.`);
+    const cloneUrl = requireCloneUrl(project);
     const baseRef = project.baseRef ?? 'main';
     if (project.sandboxLocalPath) {
       const existing = await this.sandboxes.inspectLocalProject(task.ownerUserId,project.sandboxLocalPath,cloneUrl);
@@ -112,14 +111,13 @@ export class UserSandboxTaskProvisioner implements Pick<
     let cwd = `/workspace/tasks/${safeTaskDirectory(task.id)}`;
     if (task.sandboxWorkspaceLayout === 'project') {
       if (!project || project.id !== task.projectId) throw new Error(`Project is unavailable for sandbox task: ${task.projectId}`);
-      const cloneUrl = project.sandboxCloneUrl ?? (project.repositoryPath
-        ? `git@github.com:${project.repositoryPath}.git` : undefined);
-      if (!cloneUrl) throw new SandboxProjectBootstrapError(`Project ${project.id} has no sandbox clone URL.`);
+      const cloneUrl = requireCloneUrl(project);
       if (project.sandboxLocalPath) return this.prepareProjectBinding(task,project);
       try {
         const initialized = await this.sandboxes.ensureProjectWorkspace(task.ownerUserId, {
           projectId: project.id, cloneUrl, baseRef: projectTask(task).baseRef,
         });
+        if(initialized.status!=='ready')throw new SandboxProjectBootstrapError(`Project ${project.id} requires repository Git authentication before use.`);
         cwd = initialized.cwd;
       } catch (error) {
         throw new SandboxProjectBootstrapError(`Unable to prepare sandbox project ${project.id}: ${String(error)}`);
@@ -218,4 +216,10 @@ function isUserSandboxTask(value: unknown): value is TaskRecord {
 function safeTaskDirectory(taskId: string): string {
   if (!/^[A-Za-z0-9_.:-]{1,160}$/.test(taskId)) throw new Error('Unsafe user sandbox task id.');
   return taskId.replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 120);
+}
+
+function requireCloneUrl(project:ProjectConfig):string{
+  if(!project.sandboxCloneUrl)throw new SandboxProjectBootstrapError(`project_clone_url_required: configure an explicit sandboxCloneUrl for project ${project.id}.`);
+  if(!repositoryKey(project.sandboxCloneUrl))throw new SandboxProjectBootstrapError(`project_clone_url_invalid: project ${project.id}.`);
+  return project.sandboxCloneUrl;
 }

@@ -38,6 +38,7 @@ RUN mkdir -p /usr/local/libexec \
     && mv /usr/local/bin/lark-cli /usr/local/libexec/lark-cli
 COPY bin/lark-cli-wrapper /usr/local/bin/lark-cli
 COPY bin/link-bot-native-git-init /usr/local/bin/link-bot-native-git-init
+COPY bin/git-repository-url.mjs /usr/local/bin/git-repository-url.mjs
 COPY bin/link-bot-sandbox-supervisor.mjs /usr/local/bin/link-bot-sandbox-supervisor
 COPY bin/link-bot-sandbox-bridge.mjs /usr/local/bin/link-bot-sandbox-bridge.mjs
 COPY bin/link-bot-codex-auth.mjs /usr/local/bin/link-bot-codex-auth.mjs

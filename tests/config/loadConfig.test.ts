@@ -24,6 +24,10 @@ function validConfig(overrides: Record<string, unknown> = {}): Record<string, un
 }
 
 describe('loadConfig', () => {
+  it('accepts an explicit generic Git endpoint from local configuration',async()=>{
+    const root=await createTmpDir();await writeConfig(root,validConfig({projects:[{id:'repo',name:'Repo',path:'.',sandboxCloneUrl:'git@source.example:team/repo.git'}]}));
+    expect((await loadConfig(root)).projects[0]?.sandboxCloneUrl).toBe('git@source.example:team/repo.git');
+  });
   it('defaults continuation input handoff on and validates its fail-closed rollback flag',async()=>{
     const root=await createTmpDir();await writeConfig(root,validConfig());
     expect((await loadConfig(root)).taskPlatformRollout.projectContinuationInputHandoffEnabled).toBe(true);

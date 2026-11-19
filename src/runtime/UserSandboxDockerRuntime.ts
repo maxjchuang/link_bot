@@ -6,6 +6,7 @@ import type { DynamicProjectRecord } from '../projects/DynamicProjectTypes.js';
 import type { UserSandboxRecord } from '../tasks/TaskTypes.js';
 import type { DockerCommandRunner } from './DockerRuntime.js';
 import { SandboxSupervisorClient,type SupervisorProjectWorkspace } from './SandboxSupervisorClient.js';
+import {repositoryKey} from '../git/RepositoryUrl.js';
 
 const USER_SANDBOX_RUNTIME_SPEC = '7';
 
@@ -189,8 +190,7 @@ export class UserSandboxDockerRuntime {
     const prefix=['exec','--user','10001:10001',runtime.containerName,'git','-C',workspace.cwd];
     if(expectedCloneUrl){
       const remote=await this.runner.run([...prefix,'remote','get-url','origin']);
-      const identity=(value:string)=>value.trim().replace(/^git@([^:]+):/,'https://$1/').replace(/\.git\/?$/,'').replace(/\/$/,'');
-      if(identity(remote.stdout)!==identity(expectedCloneUrl))throw new Error('Project origin does not match the configured repository.');
+      if(!repositoryKey(expectedCloneUrl)||repositoryKey(remote.stdout.trim())!==repositoryKey(expectedCloneUrl))throw new Error('Project origin does not match the configured repository.');
     }
     const named=await this.runner.run([...prefix,'symbolic-ref','--quiet','--short','HEAD'],{allowFailure:true});
     if(named.exitCode===0 && named.stdout.trim())return named.stdout.trim();
@@ -202,10 +202,8 @@ export class UserSandboxDockerRuntime {
   /** Local-only validation also used for binding/recovery when the provider is offline. */
   async inspectLocalProject(runtime: DockerUserSandboxRuntime, localPath:string, repositoryUrl:string):Promise<{localPath:string;branchName:string}> {
     if (!/^\/workspace\/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(localPath)) throw new Error('Existing clone must be /workspace/<directory>.');
-    const identity = (value:string) => value.trim().replace(/^git@([^:]+):/,'https://$1/').replace(/\.git\/?$/,'').replace(/\/$/,'');
-    const matched = /^https:\/\/(github\.com)\/([A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+)$/.exec(identity(repositoryUrl));
-    if (!matched) throw new Error('Unsupported repository URL.');
-    const provider = 'github' as const;
+    const expected=repositoryKey(repositoryUrl);
+    if(!expected)throw new Error('Unsupported repository URL.');
     const exec=async(args:string[])=>{
       const result=await this.runner.run(['exec','--user','10001:10001',runtime.containerName,...args],{allowFailure:true});
       if(result.exitCode!==0)throw new Error('Unable to inspect existing repository; verify the directory and Git state.');
@@ -214,7 +212,7 @@ export class UserSandboxDockerRuntime {
     if (await exec(['realpath','-e',localPath]) !== localPath
       || await exec(['git','-C',localPath,'rev-parse','--show-toplevel']) !== localPath) throw new Error('Existing clone path is not the repository root.');
     const origin = await exec(['git','-C',localPath,'remote','get-url','origin']);
-    const sameIdentity=provider==='github'?identity(origin).toLowerCase()===identity(repositoryUrl).toLowerCase():identity(origin)===identity(repositoryUrl);
+    const sameIdentity=repositoryKey(origin)===expected;
     if (!sameIdentity) throw new Error('Project origin does not match the requested repository.');
     await exec(['git','-C',localPath,'rev-parse','--verify','HEAD^{commit}']);
     const branchName = await this.inspectProjectBranch(runtime,{projectId:localPath.slice('/workspace/'.length),cwd:localPath,status:'ready'});
