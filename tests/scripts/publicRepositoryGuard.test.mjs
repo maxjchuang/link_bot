@@ -232,6 +232,7 @@ describe('public repository publication guard',()=>{
   it('wires independent checks into runtime wrappers and image hooks',()=>{
     const dockerfile=readFileSync('runtime/Dockerfile','utf8');
     expect(dockerfile).toContain('core.hooksPath /opt/link-bot/guard/.githooks');
+    expect(readFileSync('runtime/.dockerignore','utf8')).toContain('!hooks/**');
     expect(readFileSync('runtime/bin/git-wrapper','utf8')).toContain('--run-git');
     expect(readFileSync('runtime/bin/gh-wrapper','utf8')).toContain('--run-gh');
     expect(readFileSync('src/git/DockerTaskPublishBroker.ts','utf8')).not.toContain('core.hooksPath=/dev/null');
