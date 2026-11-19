@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
+import {publicGitExecution,requirePublicRepositoryCheck} from './PublicRepositoryGuard.js';
 import type { SqliteStateStore } from '../state/SqliteStateStore.js';
 
 export type PublishRequestStatus = 'pending' | 'rejected' | 'expired' | 'publishing' | 'published' | 'unknown' | 'failed';
@@ -313,7 +314,8 @@ export interface GitHubCommandRunner {
 }
 
 class ExecGitHubCommandRunner implements GitHubCommandRunner {
-  run(cwd: string, args: string[]): Promise<string> {
+  async run(cwd: string, args: string[]): Promise<string> {
+    await requirePublicRepositoryCheck(cwd,'gh',args);
     return new Promise((resolve, reject) => {
       execFile('gh', args, { cwd, maxBuffer: 2_000_000, timeout: 60_000, killSignal: 'SIGKILL' }, (error, stdout, stderr) => {
         if (error) return reject(new Error(`GitHub CLI ${args[0]} failed${commandFailureDetail(stderr || error.message)}`));
@@ -450,10 +452,11 @@ class SqlitePublishRequestStore {
 }
 
 export class ExecGitCommandRunner implements GitCommandRunner {
-  run(cwd: string, args: string[]): Promise<string> {
+  async run(cwd: string, args: string[]): Promise<string> {
+    const checked=publicGitExecution(args);
     return new Promise((resolve, reject) => {
       const startedAt = Date.now();
-      execFile('git', args, { cwd, maxBuffer: 2_000_000, timeout: 60_000, killSignal: 'SIGKILL' }, (error, stdout, stderr) => {
+      execFile(checked.command, checked.args, { cwd, maxBuffer: 2_000_000, timeout: 120_000, killSignal: 'SIGKILL' }, (error, stdout, stderr) => {
         if (error) {
           const elapsedMs = Date.now() - startedAt;
           const detail = sanitizeGitOutput(stderr || error.message);

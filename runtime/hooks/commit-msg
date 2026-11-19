@@ -1,0 +1,3 @@
+#!/bin/sh
+set -eu
+exec node /opt/link-bot/guard/runtime/bin/public-repository-guard.mjs --message "$1"

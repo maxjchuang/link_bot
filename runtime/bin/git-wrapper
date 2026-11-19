@@ -35,6 +35,12 @@ if [ "$command_name" = push ]; then
 fi
 
 case "$command_name" in
+  commit|push|merge|cherry-pick|revert|rebase|am)
+    exec node /opt/link-bot/guard/runtime/bin/public-repository-guard.mjs --run-git "$@"
+    ;;
+esac
+
+case "$command_name" in
   fetch|pull|push|clone|ls-remote|submodule)
     provider=""
     for argument in "$@"; do

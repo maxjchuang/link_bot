@@ -24,6 +24,7 @@ export interface UserSandboxDockerConfig {
   hostUid: number;
   hostGid: number;
   authFile?: string;
+  publicationPolicyFile?: string;
   environment?: Record<string, string>;
 }
 
@@ -343,6 +344,9 @@ export class UserSandboxDockerRuntime {
       '--mount', `type=volume,src=${runtime.homeVolume},dst=/home/codex`,
       '--mount', `type=volume,src=${runtime.codexVolume},dst=/home/codex/.codex`,
       '--mount', `type=volume,src=${runtime.agentsVolume},dst=/home/codex/.agents`,
+      ...(this.config.publicationPolicyFile ? [
+        '--mount', `type=bind,src=${this.config.publicationPolicyFile},dst=/run/link-bot/secrets/publication-policy.json,readonly`,
+      ] : []),
       ...(resolveSandboxTransport(this.config.transport) === 'unix-socket'
         ? ['--mount', `type=bind,src=${runtime.bridgeDirectory},dst=/run/link-bot/bridge`] : []),
       ...(this.config.authFile ? [

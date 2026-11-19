@@ -214,6 +214,7 @@ export function createTaskPlatform(input: CreateTaskPlatformInput): TaskPlatform
     hostUid: process.getuid?.() ?? 0,
     hostGid: process.getgid?.() ?? 0,
     authFile: resolveOptionalAuthFile(input.codexHomes.global),
+    publicationPolicyFile: join(input.projectRoot,'.link-bot/publication-policy.json'),
     environment: {
       ...runtimeProxyEnvironment(process.env),
     },

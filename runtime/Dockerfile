@@ -44,7 +44,13 @@ COPY bin/link-bot-sandbox-bridge.mjs /usr/local/bin/link-bot-sandbox-bridge.mjs
 COPY bin/link-bot-codex-auth.mjs /usr/local/bin/link-bot-codex-auth.mjs
 COPY bin/link-bot-sandbox-repo-create.mjs /usr/local/bin/link-bot-sandbox-repo-create
 COPY bin/git-wrapper /usr/local/bin/git
+COPY bin/public-repository-guard.mjs /opt/link-bot/guard/runtime/bin/public-repository-guard.mjs
+COPY hooks/ /opt/link-bot/guard/.githooks/
+RUN mv /usr/local/bin/gh /usr/local/libexec/gh
+COPY bin/gh-wrapper /usr/local/bin/gh
 RUN chmod 0755 /usr/local/bin/lark-cli /usr/local/bin/link-bot-* /usr/local/bin/git \
+    /usr/local/bin/gh /opt/link-bot/guard/.githooks/* \
+    && /usr/bin/git config --system core.hooksPath /opt/link-bot/guard/.githooks \
     && chmod 0444 /opt/link-bot/defaults/AGENTS.md
 USER 10001:10001
 WORKDIR /workspace

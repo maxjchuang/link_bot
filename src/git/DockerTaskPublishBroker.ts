@@ -39,7 +39,7 @@ export class DockerTaskPublishBroker implements TaskPublishBroker {
     const dirty = await this.git.run(repositoryPath, ['status', '--porcelain=v1']);
     if (dirty) {
       await this.git.run(repositoryPath, ['add', '--all']);
-      await this.git.run(repositoryPath, ['-c', 'core.hooksPath=/dev/null', 'commit', '-m', `link_bot task ${task.id}`]);
+      await this.git.run(repositoryPath, ['commit', '-m', `link_bot task ${task.id}`]);
     }
       const request = await this.publisher.request({
         taskId: task.id, ownerUserId: actor.userId, repositoryPath, remote: 'origin', baseRef: selected.baseRef,

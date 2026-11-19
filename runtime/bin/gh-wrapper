@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+export GH_CONFIG_DIR="${GH_CONFIG_DIR:-${LINK_BOT_TOOL_HOME:-${CODEX_HOME:-/home/codex/.codex}/tool-home}/gh}"
+exec node /opt/link-bot/guard/runtime/bin/public-repository-guard.mjs --run-gh "$@"

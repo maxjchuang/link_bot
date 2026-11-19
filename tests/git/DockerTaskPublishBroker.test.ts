@@ -52,7 +52,7 @@ describe('DockerTaskPublishBroker', () => {
       ['config', '--local', 'user.email', 'owner@example.com'],
       ['status', '--porcelain=v1'],
       ['add', '--all'],
-      ['-c', 'core.hooksPath=/dev/null', 'commit', '-m', 'link_bot task task_1'],
+      ['commit', '-m', 'link_bot task task_1'],
     ]);
     expect(publisher.request).toHaveBeenCalledWith(expect.objectContaining({
       repositoryPath: '/manager/export/task_1', authorName: 'Owner Name', authorEmail: 'owner@example.com',

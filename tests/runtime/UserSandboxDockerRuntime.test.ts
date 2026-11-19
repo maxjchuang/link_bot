@@ -80,7 +80,7 @@ describe('UserSandboxDockerRuntime', () => {
         return { stdout: '', stderr: '', exitCode: 0 };
       }),
     };
-    const runtime = new UserSandboxDockerRuntime(config(bridgeRoot), runner, async () => undefined);
+    const runtime = new UserSandboxDockerRuntime({ ...config(bridgeRoot), publicationPolicyFile: '/protected/publication-policy.json' }, runner, async () => undefined);
 
     const provisioned = await runtime.provision({ id: 'sandbox_1', ownerId: 'ou_sensitive', generation: 3 });
 
@@ -117,6 +117,7 @@ describe('UserSandboxDockerRuntime', () => {
     expect(create).toContain(`type=bind,src=${provisioned.bridgeDirectory},dst=/run/link-bot/bridge`);
     expect(create).toContain('LINK_BOT_AUTH_FILE=/run/link-bot-auth.json');
     expect(create).toContain('type=bind,src=/protected/codex-auth.json,dst=/run/link-bot-auth.json,readonly');
+    expect(create).toContain('type=bind,src=/protected/publication-policy.json,dst=/run/link-bot/secrets/publication-policy.json,readonly');
   });
 
   it('applies owner resources and falls back to defaults for other users', async () => {

@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "prepare": "node scripts/install-public-repository-hooks.mjs",
+    "guard:install": "node scripts/install-public-repository-hooks.mjs",
+    "guard:index": "node runtime/bin/public-repository-guard.mjs --index",
+    "guard:head": "node runtime/bin/public-repository-guard.mjs --head",
     "build": "tsc -p tsconfig.json",
     "preview:task-cards": "npm run build && node scripts/preview-task-cards.mjs",
     "test": "vitest run",
