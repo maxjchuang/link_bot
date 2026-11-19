@@ -18,9 +18,10 @@ export function repositoryKey(value){
 }
 
 export function cloneFailure(stderr){
+  if(/host key verification failed|remote host identification has changed|host_trust_required/i.test(stderr))return 'project_host_verification_required';
   if(/repository not found|does not (?:appear to )?exist|not a git repository|404/i.test(stderr))return 'project_repository_unavailable';
   if(/remote branch .* not found|couldn.t find remote ref|remote ref does not exist/i.test(stderr))return 'project_branch_missing';
   if(/permission denied|authentication failed|authorization failed|could not read username|publickey|auth_required/i.test(stderr))return 'project_authentication_required';
-  if(/could not resolve|failed to connect|timed? out|network is unreachable|ssl|tls/i.test(stderr))return 'project_network_failed';
+  if(/could not resolve|failed to connect|connection refused|timed? out|network is unreachable|ssl|tls/i.test(stderr))return 'project_network_failed';
   return 'project_clone_failed';
 }

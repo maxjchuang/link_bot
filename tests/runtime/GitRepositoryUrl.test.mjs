@@ -8,7 +8,10 @@ describe('sandbox Git endpoint and failure classification',()=>{
     ['ERROR: Repository not found.','project_repository_unavailable'],
     ['fatal: Remote branch feature not found in upstream origin','project_branch_missing'],
     ['Permission denied (publickey).','project_authentication_required'],
+    ['Host key verification failed.','project_host_verification_required'],
+    ['WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!','project_host_verification_required'],
     ['Could not resolve host: source.example','project_network_failed'],
+    ['ssh: connect to host source.example port 22: Connection refused','project_network_failed'],
     ['unexpected clone error','project_clone_failed'],
   ])('does not misreport every clone failure as missing login: %s',(stderr,code)=>expect(cloneFailure(stderr)).toBe(code));
 });
