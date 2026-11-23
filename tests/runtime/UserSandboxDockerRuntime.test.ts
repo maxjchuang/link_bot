@@ -9,6 +9,13 @@ UserSandboxDockerRuntime,userSandboxOwnerKey,
 import { createTmpDir } from '../helpers/tmp.js';
 
 describe('UserSandboxDockerRuntime', () => {
+  it('retains every original volume while rotating a personal-owner generation', async () => {
+    const root = await createTmpDir();
+    const runner: DockerCommandRunner = {run: vi.fn(async () => ({stdout: '', stderr: '', exitCode: 0}))};
+    const runtime = new UserSandboxDockerRuntime({...config(root), agentIdentity: {appId: 'app_test', ownerUserId: 'ou_owner'}}, runner);
+    await runtime.stopAndRemove({id: 'sandbox', ownerId: 'ou_owner', generation: 4});
+    expect(vi.mocked(runner.run).mock.calls.some(([args]) => args[0] === 'volume' && args[1] === 'rm')).toBe(false);
+  });
   it('mounts the fixed owner/app identity read-only only into the configured owner runtime', async () => {
     const root = await createTmpDir();
     const runner: DockerCommandRunner = {run: vi.fn(async args => args[3] === '{{.State.Status}}'
@@ -225,7 +232,7 @@ describe('UserSandboxDockerRuntime', () => {
     )).rejects.toThrow('Unsafe user-sandbox artifact path');
   });
 
-  it('migrates the legacy generation-local tool home before recycling only generation-local resources', async () => {
+  it('migrates legacy tool state and stops the process without deleting original volumes', async () => {
     const bridgeRoot = join(await createTmpDir(), 'bridges');
     const commands: string[][] = [];
     const runner: DockerCommandRunner = {
@@ -251,9 +258,8 @@ describe('UserSandboxDockerRuntime', () => {
     const migration = commands.find((args) =>
       args.some((arg) => arg.includes('/legacy-home/.link-bot/tool-home')))!;
     expect(migration.at(-1)).toContain('target=/codex-home/tool-home');
-    expect(commands.indexOf(migration)).toBeLessThan(commands.findIndex((args) =>
-      args[0] === 'volume' && args[1] === 'rm' && args[2] === described.homeVolume));
-    expect(commands).toContainEqual(['volume', 'rm', described.homeVolume]);
+    expect(commands.some(args => args[0] === 'volume' && args[1] === 'rm')).toBe(false);
+    expect(commands).not.toContainEqual(['volume', 'rm', described.homeVolume]);
     expect(commands).not.toContainEqual(['volume', 'rm', described.workspaceVolume]);
     expect(commands).not.toContainEqual(['volume', 'rm', described.cacheVolume]);
     expect(commands).not.toContainEqual(['volume', 'rm', described.codexVolume]);
@@ -280,7 +286,7 @@ describe('UserSandboxDockerRuntime', () => {
 
     expect(commands).toContainEqual(['volume', 'inspect', described.homeVolume]);
     expect(commands.filter((args) => args[0] === 'run')).toHaveLength(0);
-    expect(commands).toContainEqual(['volume', 'rm', described.homeVolume]);
+    expect(commands).not.toContainEqual(['volume', 'rm', described.homeVolume]);
   });
 
   it('cleans a failed generation without deleting owner-persistent volumes', async () => {
@@ -301,7 +307,7 @@ describe('UserSandboxDockerRuntime', () => {
 
     await expect(runtime.provision({ id: 'sandbox_1', ownerId: 'ou_1', generation: 2 })).rejects.toThrow('start failed');
 
-    expect(commands).toContainEqual(['volume', 'rm', described.homeVolume]);
+    expect(commands).not.toContainEqual(['volume', 'rm', described.homeVolume]);
     expect(commands).not.toContainEqual(['volume', 'rm', described.workspaceVolume]);
     expect(commands).not.toContainEqual(['volume', 'rm', described.cacheVolume]);
     expect(commands).not.toContainEqual(['volume', 'rm', described.codexVolume]);

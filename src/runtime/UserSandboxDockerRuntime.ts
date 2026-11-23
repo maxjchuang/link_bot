@@ -173,7 +173,8 @@ export class UserSandboxDockerRuntime {
       return { ...runtime, containerId: await this.inspectContainerId(runtime.containerName) };
     } catch (error) {
       await this.runner.run(['rm', '--force', runtime.containerName], { allowFailure: true }).catch(() => undefined);
-      await this.runner.run(['volume', 'rm', runtime.homeVolume], { allowFailure: true }).catch(() => undefined);
+      // Keep the generation home for diagnosis/recovery, even when startup fails.
+      // Volume deletion is an explicit operator action, not part of lifecycle cleanup.
       await rm(runtime.bridgeDirectory, { recursive: true, force: true });
       throw error;
     }
@@ -259,7 +260,8 @@ export class UserSandboxDockerRuntime {
     const runtime = this.describe(record);
     await this.runner.run(['rm', '--force', runtime.containerName], { allowFailure: true });
     await this.migrateGenerationToolHome(runtime);
-    await this.runner.run(['volume', 'rm', runtime.homeVolume], { allowFailure: true });
+    // The previous generation may contain operator-created files beyond tool state.
+    // Retain its volume; migrating known credentials does not prove everything is disposable.
     await rm(runtime.bridgeDirectory, { recursive: true, force: true });
   }
 
