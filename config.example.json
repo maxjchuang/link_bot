@@ -3,6 +3,9 @@
     "appId": "cli_your_feishu_app_id",
     "appSecret": "your_feishu_app_secret"
   },
+  "personalAgent": {
+    "enabled": false
+  },
   "restrictUsers": true,
   "allowUnlistedGroupUsers": false,
   "restrictChatIds": true,

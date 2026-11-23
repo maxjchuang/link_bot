@@ -7,6 +7,152 @@ import type { TaskRecord, TurnRecord } from '../../src/tasks/TaskTypes.js';
 import { createTmpDir } from '../helpers/tmp.js';
 
 describe('AppServerRequestService', () => {
+  it('atomically consumes an owner ticket under concurrent new native requests', async () => {
+    const h = await createHarness(true);
+    h.service.setOwnerContinuation({suspend: async () => undefined, resume: async () => undefined});
+    try {
+      const ticket = await h.service.capture(serverRequest());
+      await h.service.decide({requestId: ticket.id, userId: 'ou_owner', generation: 1, decision: 'allow'});
+      await h.store.updateAppServerRequest(ticket.id, current => ({...current,
+        continuation: {...current.continuation!, state: 'submitted', resumedLocalTurnId: 'turn_1'}}));
+      await Promise.all(['new-a', 'new-b'].map(requestId => h.service.capture(serverRequest({requestId, generation: 2}))));
+      expect(h.backend.responses.filter(response => (response.result as {decision?: string}).decision === 'accept')).toHaveLength(1);
+    } finally {h.service.dispose();}
+  });
+  it('does not auto-resume a file approval without a complete patch, but cancels the native blocker', async () => {
+    const h = await createHarness(true);
+    const suspend = vi.fn(async () => undefined), resume = vi.fn(async () => undefined);
+    h.service.setOwnerContinuation({suspend, resume});
+    try {
+      const request = await h.service.capture(serverRequest({method: 'item/fileChange/requestApproval',
+        params: {threadId: 'thread_1', turnId: 'turn_1', grantRoot: '/workspace'}}));
+      expect(request.continuation).toMatchObject({state: 'waiting', replayable: false});
+      expect(suspend).toHaveBeenCalledOnce();
+      expect(h.backend.responses.at(-1)?.result).toEqual({decision: 'decline'});
+      await expect(h.service.decide({requestId: request.id, userId: 'ou_owner', generation: 1, decision: 'allow'})).rejects.toThrow('snapshot');
+      expect(resume).not.toHaveBeenCalled();
+    } finally {h.service.dispose();}
+  });
+  it('cancels native user-input waiting and delivers owner answers as a new scoped continuation', async () => {
+    const h = await createHarness(true);
+    const resume = vi.fn(async () => undefined);
+    h.service.setOwnerContinuation({suspend: async () => undefined, resume});
+    try {
+      const request = await h.service.capture(serverRequest({method: 'item/tool/requestUserInput',
+        params: {threadId: 'thread_1', turnId: 'turn_1', questions: [{id: 'scope', question: 'Scope?', options: [{label: 'tests', description: 'Tests'}]}]}}));
+      expect(h.backend.responses.at(-1)?.result).toEqual({answers: {}});
+      await h.service.decide({requestId: request.id, userId: 'ou_owner', generation: 1, decision: 'answer', answers: {scope: ['tests']}});
+      expect(resume).toHaveBeenCalledWith(expect.objectContaining({decision: 'answer', answers: {scope: ['tests']}}));
+      expect(h.backend.responses).toHaveLength(1);
+    } finally {h.service.dispose();}
+  });
+  it('keeps uncertain native cancellation non-replayable across recovery', async () => {
+    const h = await createHarness(true);
+    const resume = vi.fn(async () => undefined);
+    h.service.setOwnerContinuation({suspend: async () => {throw new Error('timeout');}, resume});
+    try {
+      await expect(h.service.capture(serverRequest())).rejects.toThrow('unknown');
+      const request = (await h.store.listPendingAppServerRequests())[0];
+      expect(request.continuation?.state).toBe('unknown');
+      await h.service.recover();
+      expect(resume).not.toHaveBeenCalled();
+      expect(await h.service.decide({requestId: request.id, userId: 'ou_owner', generation: 1, decision: 'allow'}))
+        .toMatchObject({accepted: false, reason: 'not_pending'});
+    } finally {h.service.dispose();}
+  });
+  it('cancels a native command before waiting for the owner and consumes only the exact new-turn operation once', async () => {
+    const h = await createHarness(true);
+    const suspend = vi.fn(async () => undefined);
+    const resume = vi.fn(async () => undefined);
+    h.service.setOwnerContinuation({suspend, resume});
+    try {
+      const request = await h.service.capture(serverRequest());
+      expect(request.continuation?.state).toBe('waiting');
+      expect(h.backend.responses).toMatchObject([{requestId: 'approval_1', result: {decision: 'decline'}}]);
+      expect(suspend).toHaveBeenCalledOnce();
+      // Only a real terminal transition releases the source turn.
+      await h.store.updateTask('task_1', current => ({...current, activeTurnId: undefined}));
+      await h.store.updateTurn('turn_1', current => ({...current, state: 'interrupted'}));
+      await h.service.closeTurn('task_1', 'turn_1');
+      expect((await h.store.getAppServerRequest(request.id))?.status).toBe('pending');
+      await h.service.decide({requestId: request.id, userId: 'ou_owner', generation: 1, decision: 'allow'});
+      expect(resume).toHaveBeenCalledOnce();
+      expect(h.backend.responses).toHaveLength(1); // Never accept the old RPC.
+      await h.store.saveTurn({...turnRecord(), id: 'turn_2', codexTurnId: 'turn_2', createdBy: 'ou_requester', groupServiceVersion: 1});
+      await h.store.updateTask('task_1', current => ({...current, activeTurnId: 'turn_2'}));
+      await h.store.updateAppServerRequest(request.id, current => ({...current,
+        continuation: {...current.continuation!, state: 'submitted', resumedLocalTurnId: 'turn_2'}}));
+      const next = await h.service.capture(serverRequest({generation: 2, requestId: 'new_rpc',
+        params: {threadId: 'thread_1', turnId: 'turn_2', command: 'npm test'}}));
+      expect(next.status).toBe('delivered');
+      expect(h.backend.responses.at(-1)).toMatchObject({generation: 2, requestId: 'new_rpc', result: {decision: 'accept'}});
+      expect((await h.store.getAppServerRequest(request.id))?.continuation?.state).toBe('consumed');
+      // Another native request cannot consume the same approval.
+      await h.service.capture(serverRequest({generation: 2, requestId: 'duplicate_rpc',
+        params: {threadId: 'thread_1', turnId: 'turn_2', command: 'npm test'}}));
+      expect(h.backend.responses.at(-1)?.result).toEqual({decision: 'decline'});
+    } finally {h.service.dispose();}
+  });
+
+  it('does not use owner approval for changed command arguments or a different local turn', async () => {
+    const h = await createHarness(true);
+    h.service.setOwnerContinuation({suspend: async () => undefined, resume: async () => undefined});
+    try {
+      const request = await h.service.capture(serverRequest());
+      await h.service.decide({requestId: request.id, userId: 'ou_owner', generation: 1, decision: 'allow'});
+      await h.store.updateAppServerRequest(request.id, current => ({...current,
+        continuation: {...current.continuation!, state: 'submitted', resumedLocalTurnId: 'turn_1'}}));
+      await h.service.capture(serverRequest({requestId: 'changed-command',
+        params: {threadId: 'thread_1', turnId: 'turn_1', command: 'npm publish'}}));
+      expect(h.backend.responses.map(response => response.result)).toEqual([{decision: 'decline'}, {decision: 'decline'}]);
+    } finally {h.service.dispose();}
+  });
+  it.each(['item/commandExecution/requestApproval','item/tool/requestUserInput'])(
+    'assigns unclassified native personal-agent requests to the owner, not the requester: %s', async method => {
+      const h = await createHarness(true); try {
+        const request = await h.service.capture(serverRequest({method}));
+        expect(request).toMatchObject({purpose: 'owner_authorization', ownerUserId: 'ou_owner',
+          requesterUserId: 'ou_requester', groupServiceVersion: 1, sourceAudience: {chatId: 'oc_group', chatType: 'group'}});
+        expect(request.operationSnapshotHash).toMatch(/^[a-f0-9]{64}$/);
+        expect(await h.service.decide({requestId: request.id, userId: 'ou_requester', generation: 1,
+          decision: method.endsWith('requestUserInput') ? 'answer' : 'allow',
+          ...(method.endsWith('requestUserInput') ? {answers: {scope: ['tests']}} : {})})).toMatchObject({accepted: false, reason: 'identity_mismatch'});
+        expect(h.backend.responses).toHaveLength(0);
+      } finally {h.service.dispose();}
+    });
+  it('rechecks group qualification and exact operation snapshot before owner approval', async () => {
+    const h = await createHarness(true); try {
+      const request = await h.service.capture(serverRequest());
+      h.qualificationCurrent = false;
+      await expect(h.service.decide({requestId: request.id, userId: 'ou_owner', generation: 1, decision: 'allow'})).rejects.toThrow('qualification');
+      h.qualificationCurrent = true;
+      await h.store.updateAppServerRequest(request.id, current => ({...current, payload: {command: 'different operation'}}));
+      await expect(h.service.decide({requestId: request.id, userId: 'ou_owner', generation: 1, decision: 'allow'})).rejects.toThrow('changed');
+      expect(h.backend.responses).toHaveLength(0);
+    } finally {h.service.dispose();}
+  });
+  it('delivers a verified owner decision once without rewriting the requester', async () => {
+    const h = await createHarness(true); try {
+      const request = await h.service.capture(serverRequest());
+      expect(await h.service.decide({requestId: request.id, userId: 'ou_owner', generation: 1, decision: 'allow'}))
+        .toMatchObject({accepted: true});
+      expect(h.backend.responses).toHaveLength(1);
+      expect(await h.store.getTurn('turn_1')).toMatchObject({createdBy: 'ou_requester'});
+    } finally {h.service.dispose();}
+  });
+  it('characterizes that delivering a denial alone does not finish the active turn', async () => {
+    const h = await createHarness();
+    try {
+      const request = await h.service.capture(serverRequest());
+      await h.service.decide({requestId: request.id, userId: 'ou_owner', generation: 1, decision: 'deny'});
+      expect(h.backend.responses).toHaveLength(1);
+      expect(h.backend.responses[0].result).toEqual({decision: 'decline'});
+      await expect(h.store.getAppServerRequest(request.id)).resolves.toMatchObject({status: 'delivered'});
+      await expect(h.store.getTask('task_1')).resolves.toMatchObject({activeTurnId: 'turn_1', pinned: true});
+      await expect(h.store.getTurn('turn_1')).resolves.toMatchObject({state: 'waiting_approval'});
+    } finally { h.service.dispose(); }
+  });
+
   it('publishes preparation, submission and response failure separately and isolates view failures', async () => {
     const h = await createHarness();
     const changes: AppServerRequestRecord[] = [];
@@ -171,17 +317,25 @@ describe('AppServerRequestService', () => {
   });
 });
 
-async function createHarness() {
+async function createHarness(personalAgent = false) {
   let now = +new Date('2026-07-28T02:00:00.000Z');
   const clock = () => new Date(now);
   const store = new FileStateStore(await createTmpDir(), clock);
-  await store.saveTask(taskRecord());
-  await store.saveTurn(turnRecord());
+  await store.saveTask({...taskRecord(), ...(personalAgent ? {identityMode: 'personal-agent' as const,
+    agentOwnerUserId: 'ou_owner', runtimeMode: 'user-sandbox' as const, activeTurnId: 'turn_1'} : {})});
+  await store.saveTurn({...turnRecord(), ...(personalAgent ? {createdBy: 'ou_requester', groupServiceVersion: 1} : {})});
   const backend = new RequestBackend();
   const render = vi.fn<(request: AppServerRequestRecord) => Promise<void>>(async () => undefined);
-  const service = new AppServerRequestService(store, backend, { render }, 60_000, clock);
+  let qualificationCurrent = true;
+  const service = new AppServerRequestService(store, backend, { render }, 60_000, clock, personalAgent ? () => {
+    if (!qualificationCurrent) throw new Error('Group qualification revoked.');
+    return {mode: 'personal-agent', agentId: 'agent_test', agentOwnerUserId: 'ou_owner', requesterUserId: 'ou_requester',
+      audience: {chatId: 'oc_group', chatType: 'group'}, groupServiceVersion: 1};
+  } : undefined);
   return {
     store, backend, render, service,
+    get qualificationCurrent() {return qualificationCurrent;},
+    set qualificationCurrent(value: boolean) {qualificationCurrent = value;},
     get now() { return now; },
     set now(value: number) { now = value; },
   };

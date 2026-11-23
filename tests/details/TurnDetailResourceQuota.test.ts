@@ -132,7 +132,8 @@ describe('physical detail quota under deletion failure', () => {
     files.append(orphan, 0, 'x'.repeat(50000)); // Fixture for an old, unaccounted allocation; not a new recording write.
     store.close();
     const db = new Database(path);
-    db.exec(`DROP INDEX detail_resource_registry_retired;
+    db.exec(`DROP TABLE group_service_events; DROP TABLE group_services;
+      DROP INDEX detail_resource_registry_retired;
       ALTER TABLE detail_resource_registry DROP COLUMN retired;
       ALTER TABLE detail_resource_registry DROP COLUMN reserved_bytes;
       ALTER TABLE detail_resource_registry DROP COLUMN held_bytes;

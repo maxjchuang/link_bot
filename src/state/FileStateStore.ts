@@ -19,6 +19,7 @@ import type {
 import type { AppServerRequestRecord, DecideAppServerRequestResult } from '../approvals/AppServerRequestTypes.js';
 import type { TaskBindingRecord, TaskRecord, TurnRecord } from '../tasks/TaskTypes.js';
 import type { LiveTurnRecord } from '../livecards/LiveTurnCardTypes.js';
+import {assertTaskIdentityTransition} from '../security/AgentExecutionIdentity.js';
 
 type Clock = () => Date;
 type WriteQueueName = 'state' | 'events' | 'sessionLogs';
@@ -99,7 +100,12 @@ export class FileStateStore {
 
   async saveTask(task: TaskRecord): Promise<void> {
     const id = this.safeFileName(task.id);
-    await this.writeJson(join(this.baseDir, 'state/tasks', `${id}.json`), task);
+    const filePath = join(this.baseDir, 'state/tasks', `${id}.json`);
+    await this.enqueue('state', async () => {
+      const previous = await this.readJson<TaskRecord>(filePath);
+      assertTaskIdentityTransition(previous, task);
+      await this.writeJsonFile(filePath, task);
+    });
   }
 
   async getTask(taskId: string): Promise<TaskRecord | undefined> {
@@ -118,7 +124,9 @@ export class FileStateStore {
     return this.enqueue('state', async () => {
       const current = await this.readJson<TaskRecord>(filePath);
       if (!current) return undefined;
+      const previousIdentity = {...current};
       const next = updater(current);
+      assertTaskIdentityTransition(previousIdentity, next);
       await this.writeJsonFile(filePath, next);
       return next;
     });

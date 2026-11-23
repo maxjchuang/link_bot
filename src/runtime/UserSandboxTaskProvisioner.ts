@@ -1,4 +1,5 @@
-import type { ProjectConfig } from '../domain/types.js';
+import type { BotConfig, ProjectConfig } from '../domain/types.js';
+import {assertTaskIdentityTransition, resolveTaskExecutionOwner} from '../security/AgentExecutionIdentity.js';
 import type { SqliteStateStore } from '../state/SqliteStateStore.js';
 import type { ProvisionedTaskRuntime,TaskRuntimeProvisioner } from '../tasks/TaskPlatformService.js';
 import { projectTask,taskMode,type TaskRecord,type TaskRuntimeState } from '../tasks/TaskTypes.js';
@@ -12,6 +13,7 @@ export class UserSandboxTaskProvisioner implements Pick<
   constructor(
     private readonly store: SqliteStateStore,
     private readonly sandboxes: UserSandboxManager,
+    private readonly identityConfig: Pick<BotConfig, 'personalAgent'> = {},
   ) {}
 
   async provision(input: {
@@ -27,7 +29,9 @@ export class UserSandboxTaskProvisioner implements Pick<
   }
 
   async resume(task: TaskRecord, project?: ProjectConfig): Promise<ProvisionedTaskRuntime> {
-    this.requireSandboxTask(task.id);
+    const current = this.requireSandboxTask(task.id);
+    if (current.ownerUserId !== task.ownerUserId) throw new Error('User sandbox task owner mismatch.');
+    task = current;
     if (taskMode(task) === 'chat' && project) throw new Error('Chat task cannot load a project.');
     if (taskMode(task) === 'project' && !project) throw new Error('Project task required');
     const ensured = await this.sandboxes.ensure(task.ownerUserId, { leaseWaitMs: 60_000 });
@@ -58,7 +62,7 @@ export class UserSandboxTaskProvisioner implements Pick<
   }
 
   async stop(task: TaskRecord): Promise<void> {
-    this.requireSandboxTask(task.id);
+    this.requireSandboxTask(task.id, false);
     // The App Server backend stops the task process. The owner sandbox remains
     // available for sibling tasks and later resumptions.
   }
@@ -73,7 +77,7 @@ export class UserSandboxTaskProvisioner implements Pick<
   }
 
   async observeTaskState(task: TaskRecord): Promise<TaskRuntimeState> {
-    const current = this.requireSandboxTask(task.id);
+    const current = this.requireSandboxTask(task.id, false);
     const sandbox = this.store.getUserSandboxByOwner(current.ownerUserId);
     return sandbox?.status === 'running' ? 'hot' : sandbox?.status === 'failed' ? 'failed' : 'warm';
   }
@@ -94,16 +98,21 @@ export class UserSandboxTaskProvisioner implements Pick<
   }
 
   async fallbackToLegacy(taskId: string, ownerUserId: string): Promise<TaskRecord> {
+    const task = this.requireSandboxTask(taskId);
+    if (task.identityMode === 'personal-agent') throw new Error('Cannot fall back a personal-agent task.');
+    if (task.ownerUserId !== ownerUserId) throw new Error('User sandbox task owner mismatch.');
     await this.sandboxes.reclaim(ownerUserId);
-    const task = this.store.fallbackUnstartedUserSandboxTaskToLegacy(taskId);
-    if (!task) throw new Error(`User sandbox task cannot fall back to legacy mode: ${taskId}`);
-    return task;
+    const fallback = this.store.fallbackUnstartedUserSandboxTaskToLegacy(taskId);
+    if (!fallback) throw new Error(`User sandbox task cannot fall back to legacy mode: ${taskId}`);
+    return fallback;
   }
 
-  private requireSandboxTask(taskId: string): TaskRecord {
+  private requireSandboxTask(taskId: string, execution = true): TaskRecord {
     const task = this.store.getTask(taskId);
     if (!task) throw new Error(`Task not found: ${taskId}`);
     if (task.runtimeMode !== 'user-sandbox') throw new Error(`Task is not assigned to a user sandbox: ${taskId}`);
+    if (execution) resolveTaskExecutionOwner(this.identityConfig, task);
+    else assertTaskIdentityTransition(task, task);
     return task;
   }
 
@@ -150,7 +159,7 @@ export function modeAwareTaskProvisioner(
       try {
         return await sandbox.provision(input);
       } catch (error) {
-        if (taskMode(task) === 'chat' || !legacyFallbackEnabled || error instanceof SandboxProjectBootstrapError) throw error;
+        if (task.identityMode === 'personal-agent' || taskMode(task) === 'chat' || !legacyFallbackEnabled || error instanceof SandboxProjectBootstrapError) throw error;
         await sandbox.fallbackToLegacy(input.taskId, input.ownerUserId);
         return legacy.provision(input);
       }

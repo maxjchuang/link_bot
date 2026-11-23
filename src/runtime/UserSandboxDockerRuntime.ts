@@ -1,6 +1,6 @@
 import { dockerSandboxEndpoint, parseDockerSandboxEndpoint, resolveSandboxTransport, sandboxControlSocketPath, type SandboxTransportMode } from './SandboxSocketTransport.js';
 import { createHash } from 'node:crypto';
-import { chmod,mkdir,open,rm,stat } from 'node:fs/promises';
+import { chmod,mkdir,open,rm,stat,writeFile } from 'node:fs/promises';
 import { basename,join } from 'node:path';
 import type { DynamicProjectRecord } from '../projects/DynamicProjectTypes.js';
 import type { UserSandboxRecord } from '../tasks/TaskTypes.js';
@@ -25,6 +25,7 @@ export interface UserSandboxDockerConfig {
   hostGid: number;
   authFile?: string;
   publicationPolicyFile?: string;
+  agentIdentity?: {appId: string; ownerUserId: string};
   environment?: Record<string, string>;
 }
 
@@ -127,6 +128,17 @@ export class UserSandboxDockerRuntime {
     const runtime = this.describe(record);
     const observed = await this.observe(runtime);
     if (observed === 'running') {
+      if (this.config.agentIdentity && runtime.ownerId === this.config.agentIdentity.ownerUserId) {
+        const mounts = await this.runner.run(['container', 'inspect', '--format', '{{json .Mounts}}', runtime.containerName]);
+        let readonlyPolicy = false;
+        try {readonlyPolicy = JSON.parse(mounts.stdout).some((mount: {Destination?: string; RW?: boolean}) =>
+          mount.Destination === '/run/link-bot/secrets/agent-identity.json' && mount.RW === false);} catch {/* incompatible runtime */}
+        if (!readonlyPolicy) throw new Error('Personal-agent runtime requires a controlled image upgrade and owner policy mount.');
+        const expected = this.config.agentIdentity;
+        await this.runner.run(['exec', '--user', '10001:10001', runtime.containerName, 'node', '-e',
+          "const fs=require('fs');fs.accessSync('/usr/local/bin/link-bot-lark-owner-check.mjs');const p=JSON.parse(fs.readFileSync('/run/link-bot/secrets/agent-identity.json','utf8'));if(p.appId!==process.argv[1]||p.ownerUserId!==process.argv[2])process.exit(77)",
+          expected.appId, expected.ownerUserId]);
+      }
       await this.waitForSupervisor(runtime.supervisorSocketPath);
       return { ...runtime, containerId: await this.inspectContainerId(runtime.containerName) };
     }
@@ -140,6 +152,9 @@ export class UserSandboxDockerRuntime {
     // so other host users cannot reach the permissive inner mount point.
     await mkdir(runtime.bridgeDirectory, { recursive: true, mode: 0o711 });
     await chmod(runtime.bridgeDirectory, 0o711);
+    if (this.config.agentIdentity && runtime.ownerId === this.config.agentIdentity.ownerUserId) {
+      await writeFile(join(runtime.bridgeDirectory, 'agent-identity.json'), JSON.stringify(this.config.agentIdentity), {mode: 0o444, flag: 'wx'});
+    }
 
     await this.createVolume(runtime.workspaceVolume, runtime.ownerKey, 'workspace', 'persistent');
     await this.createVolume(runtime.cacheVolume, runtime.ownerKey, 'cache', 'reclaimable');
@@ -344,6 +359,10 @@ export class UserSandboxDockerRuntime {
       '--mount', `type=volume,src=${runtime.homeVolume},dst=/home/codex`,
       '--mount', `type=volume,src=${runtime.codexVolume},dst=/home/codex/.codex`,
       '--mount', `type=volume,src=${runtime.agentsVolume},dst=/home/codex/.agents`,
+      ...(this.config.agentIdentity && runtime.ownerId === this.config.agentIdentity.ownerUserId ? [
+        '--env', 'LINK_BOT_PERSONAL_AGENT=1',
+        '--mount', `type=bind,src=${join(runtime.bridgeDirectory,'agent-identity.json')},dst=/run/link-bot/secrets/agent-identity.json,readonly`,
+      ] : []),
       ...(this.config.publicationPolicyFile ? [
         '--mount', `type=bind,src=${this.config.publicationPolicyFile},dst=/run/link-bot/secrets/publication-policy.json,readonly`,
       ] : []),

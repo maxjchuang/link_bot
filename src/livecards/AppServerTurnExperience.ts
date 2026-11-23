@@ -104,6 +104,7 @@ export class FeishuAppServerTurnExperience implements AppServerTurnExperience {
       saveResult?(identity: DetailTurnIdentity, answer: string, endedAt: string): void | { text: string; hasMore: boolean; endedAt: string };
     },
     private readonly telemetry?: CardTelemetry,
+    private readonly authorizePublication?: (record: AppServerTurnCardRecord) => Promise<boolean>,
   ) {}
 
   async requestChanged(request: AppServerRequestRecord): Promise<void> {
@@ -147,10 +148,12 @@ export class FeishuAppServerTurnExperience implements AppServerTurnExperience {
     record.detailCardRef = detailCardRef;
     this.store.save(record);
     try {
+      if (this.authorizePublication && !await this.authorizePublication(record)) return;
       const initialCard = record.structuredView ? structuredCard(input.displayLabel ?? input.projectId ?? '纯对话', undefined, 0, record, this.clock().getTime(), record.inlineDetails ? emptyInlineDetails() : undefined)
         : runningCard(input.displayLabel ?? input.projectId ?? '纯对话', undefined, 0, input);
       const created = await observeCardDelivery(this.telemetry, 'card_create', initialCard, () => this.gateway.createCardKitEntity(initialCard));
       this.store.update(record.id, (current) => ({ ...current, cardId: created.cardId }));
+      if (this.authorizePublication && !await this.authorizePublication(record)) return;
       const sent = await observeCardDelivery(this.telemetry, 'card_send', initialCard,
         () => this.gateway.sendCardKitEntityToTarget(input.target, created.cardId, record.sendUuid));
       try { this.telemetry?.observeWaiting?.('not_waiting'); } catch { /* Isolated metrics. */ }
@@ -461,6 +464,7 @@ export class FeishuAppServerTurnExperience implements AppServerTurnExperience {
   private async deliverFinalization(record: AppServerTurnCardRecord): Promise<boolean> {
     // Re-read the authoritative delivery owner; queued sends must never race original-card updates.
     record = this.store.get(record.id) ?? record;
+    if (this.authorizePublication && !await this.authorizePublication(record)) return this.quarantineFinal(record.id, 'permanent');
     if (record.deliveryFailure) return false;
     if (!record.finalizationIntent) return ['finalized', 'interrupted'].includes(record.state);
     if (record.finalizationIntent.deliveryMode === 'outbox') return true;
@@ -616,6 +620,10 @@ export class FeishuAppServerTurnExperience implements AppServerTurnExperience {
             ? {...region,previousElement:JSON.parse(previous) as Record<string,unknown>} : region;
         });
         const operation = this.allocateUpdate(card.recordId);
+        const publication = this.store.get(card.recordId);
+        if (this.authorizePublication && (!publication || !await this.authorizePublication(publication))) {
+          card.failed = true; card.dirty = false; return;
+        }
         await observeCardDelivery(this.telemetry, 'card_update', payload, () => regions && !headerChanged()
           ? this.gateway.updateCardKitRegions ? this.gateway.updateCardKitRegions({ cardId: card.cardId, regions: updates!, ...operation })
             : Promise.reject(new Error('inline_regions_unavailable'))

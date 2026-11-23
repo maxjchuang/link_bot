@@ -56,6 +56,7 @@ export class FeishuOutbox {
     private readonly store: SqliteStateStore,
     private readonly transport: FeishuOutboxTransport,
     private readonly clock: () => Date = () => new Date(),
+    private readonly authorizeDelivery?: (record: FeishuOutboxRecord) => Promise<boolean>,
   ) {}
 
   enqueue(input: {
@@ -93,6 +94,14 @@ export class FeishuOutbox {
         continue;
       }
       try {
+        if (this.authorizeDelivery && !await this.authorizeDelivery(record)) {
+          // Reuse the established stopped-retry representation; never mark a
+          // revoked delivery as sent, and never revive it on group re-enable.
+          this.store.db.prepare("UPDATE outbound_events SET status='pending', attempts=-1, last_error='personal_agent_delivery_revoked', updated_at=? WHERE id=?")
+            .run(this.clock().toISOString(), record.id);
+          failed += 1;
+          continue;
+        }
         const receipt = await this.transport.deliver({ ...record, status: 'sending', attempts: record.attempts + 1 });
         let changedRequest: AppServerRequestRecord | undefined;
         this.store.db.transaction(() => {

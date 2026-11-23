@@ -12,6 +12,23 @@ import { FeishuOutbox, FeishuGatewayOutboxTransport } from '../../src/feishu/Fei
 afterEach(() => vi.useRealTimers());
 
 describe('FeishuAppServerTurnExperience', () => {
+  it('stops final publication when service is revoked, without reporting a sent result', async () => {
+    let allowed = true;
+    const gateway = {createCardKitEntity: vi.fn(async () => ({cardId: 'card'})),
+      sendCardKitEntityToTarget: vi.fn(async () => ({messageId: 'message'})),
+      updateCardKitElement: vi.fn(async () => undefined), replaceCardKitEntity: vi.fn(async () => undefined)};
+    const experience = new FeishuAppServerTurnExperience(gateway, 1000, undefined, undefined,
+      'task_platform', undefined, undefined, undefined, async () => allowed);
+    try {
+      await experience.accepted({taskId: 'task', turnId: 'turn', target: {chatId: 'chat'}});
+      allowed = false;
+      await experience.event({type: 'turn.started', taskId: 'task', threadId: 'thread', turnId: 'remote'});
+      await experience.event({type: 'turn.completed', taskId: 'task', threadId: 'thread', turnId: 'remote',
+        status: 'completed', turn: {items: [{type: 'agentMessage', text: 'must not publish'}]}});
+      expect(gateway.replaceCardKitEntity).not.toHaveBeenCalled();
+      expect(gateway.sendCardKitEntityToTarget).toHaveBeenCalledTimes(1);
+    } finally {experience.dispose();}
+  });
   it('leaves a newly accepted continuation live when startup recovery reaches the cards phase', async () => {
     const store = new SqliteAppServerTurnCardStore(join(await mkdtemp(join(tmpdir(), 'startup-continuation-card-')), 'state.sqlite'));
     const gateway = {

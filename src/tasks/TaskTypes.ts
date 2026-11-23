@@ -10,8 +10,14 @@ export type TaskScope = 'private' | 'group' | 'topic' | 'legacy';
 export type TaskContextState = 'active' | 'archived' | 'failed';
 
 export interface TaskRecord {
+  /** Group grant at creation; re-enabling a group creates a new shared scope, not old queued work. */
+  groupServiceVersion?: number;
   id: string;
   ownerUserId: string;
+  /** Missing means legacy; never infer a persisted task's mode from the current switch. */
+  identityMode?: 'legacy' | 'personal-agent';
+  /** Immutable execution owner for personal-agent tasks. createdBy remains the real actor. */
+  agentOwnerUserId?: string;
   /** Missing on historical records means project mode. */
   mode?: 'chat' | 'project';
   /**
@@ -211,6 +217,8 @@ export interface RepositoryMigrationRecord {
 }
 
 export interface TurnRecord {
+  /** Original admission epoch; recovery must not substitute a newer grant. */
+  groupServiceVersion?: number;
   inputHandoff?: ContinuationInputSnapshot;
   id: string;
   taskId: string;

@@ -8,6 +8,11 @@ export type AppServerRequestStatus =
   | 'connection_lost';
 
 export interface AppServerRequestRecord {
+  purpose?: 'owner_authorization' | 'requester_clarification';
+  requesterUserId?: string;
+  groupServiceVersion?: number;
+  sourceAudience?: import('../security/AgentExecutionIdentity.js').AgentExecutionIdentity['audience'];
+  operationSnapshotHash?: string;
   id: string;
   kind: AppServerRequestKind;
   ownerUserId: string;
@@ -31,6 +36,14 @@ export interface AppServerRequestRecord {
   /** Feishu operation-card receipt; deliveredAt remains the response-to-Codex timestamp. */
   operationCard?: { status: 'sent' | 'failed'; messageId?: string; messageAppLink?: string; at: string };
   responseState?: 'submitting' | 'failed' | 'delivered';
+  /** Original RPC is cancelled; an owner decision is a durable one-operation ticket, not an RPC replay. */
+  continuation?: {
+    state: 'cancelling' | 'waiting' | 'queued' | 'submitted' | 'consumed' | 'unknown';
+    operationHash: string;
+    /** False for requests without enough data to reconstruct a controlled operation. */
+    replayable?: boolean;
+    resumedLocalTurnId?: string;
+  };
 }
 
 export type DecideAppServerRequestResult =

@@ -230,7 +230,8 @@ export async function loadConfig(projectRoot: string): Promise<BotConfig> {
     || new Set([...normalizedDream.administratorIds, ...normalizedUpgrade.adminUsers]).size === 0)) {
     throw new Error('Invalid config field: botGlobalMemory requires managedMemory and at least one administrator');
   }
-  return {
+  const config: BotConfig = {
+    personalAgent: normalizePersonalAgent(optionalRecord(record.personalAgent, 'personalAgent')),
     feishu: {
       appId: requireString(feishu.appId, 'feishu.appId'),
       appSecret: requireString(feishu.appSecret, 'feishu.appSecret'),
@@ -318,6 +319,40 @@ export async function loadConfig(projectRoot: string): Promise<BotConfig> {
       retentionHours: optionalPositiveInteger(media.retentionHours, 24, 'media.retentionHours'),
     },
   };
+  validatePersonalAgent(config);
+  return config;
+}
+
+function normalizePersonalAgent(record: Record<string, unknown>): NonNullable<BotConfig['personalAgent']> {
+  const enabled = optionalBoolean(record.enabled, false, 'personalAgent.enabled');
+  const owner = record.ownerUserId === undefined ? undefined : requireString(record.ownerUserId, 'personalAgent.ownerUserId');
+  if (owner !== undefined && !/^ou_[A-Za-z0-9_-]{1,128}$/.test(owner)) {
+    throw new Error('Invalid config field: personalAgent.ownerUserId');
+  }
+  if (enabled) {
+    if (!owner) throw new Error('Invalid config field: personalAgent.ownerUserId is required');
+    return { enabled: true, ownerUserId: owner };
+  }
+  return { enabled: false, ...(owner ? { ownerUserId: owner } : {}) };
+}
+
+function validatePersonalAgent(config: BotConfig): void {
+  if (!config.personalAgent?.enabled) return;
+  const owner = config.personalAgent.ownerUserId;
+  const administrators = [config.upgrade.adminUsers, config.hostControl?.adminUsers ?? [],
+    config.codexHooks.adminUsers, config.dream?.administratorIds ?? []];
+  if (!config.upgrade.adminUsers.includes(owner) || administrators.some(ids => ids.some(id => id !== owner))
+    || config.hostControl?.enabled && !config.hostControl.adminUsers.includes(owner)) {
+    throw new Error('Invalid config field: personalAgent conflicts with administrative identities');
+  }
+  const sandbox = config.userSandboxes;
+  if (config.runtime?.backend !== 'app-server' || !sandbox?.enabled || sandbox.legacyFallbackEnabled
+    || sandbox.enabledOwners.length > 0 && !sandbox.enabledOwners.includes(owner)) {
+    throw new Error('Invalid config field: personalAgent requires an available owner user sandbox without legacy fallback');
+  }
+  if (config.restrictUsers && !config.allowedUsers.includes(owner)) {
+    throw new Error('Invalid config field: personalAgent owner is excluded from the maintenance user allowlist');
+  }
 }
 
 function normalizeUserSandboxes(record: Record<string, unknown>): NonNullable<BotConfig['userSandboxes']> {

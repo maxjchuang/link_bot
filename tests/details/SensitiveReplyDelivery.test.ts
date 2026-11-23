@@ -18,6 +18,13 @@ async function fixture() {
 }
 
 describe('sensitive reply private delivery', () => {
+  it('never privately forwards hidden content in personal-agent mode', async () => {
+    const f = await fixture();
+    const reply = await f.delivery.prepare({...context, identityMode: 'personal-agent', requesterUserId: 'ou_requester'}, raw);
+    expect(reply).not.toContain('fake-private-authorization');
+    expect(reply).not.toContain('私聊发送');
+    expect(f.send).not.toHaveBeenCalled(); expect(f.verify).not.toHaveBeenCalled();
+  });
   it('can disable private delivery and retries without exposing secrets or touching the transport', async () => {
     const f = await fixture();
     const disabled = new SensitiveReplyDelivery(f.root, f.gateway, f.clock, false);

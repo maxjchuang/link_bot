@@ -3,6 +3,19 @@ import { LiveTurnProjection } from '../../src/projections/LiveTurnProjection.js'
 import type { AppServerRequestRecord } from '../../src/approvals/AppServerRequestTypes.js';
 
 describe('LiveTurnProjection', () => {
+  it('keeps owner-only operation details and private card links out of the shared projection', () => {
+    const projection = new LiveTurnProjection();
+    projection.append({type: 'turn.started', taskId: 'task', threadId: 'thread', turnId: 'turn'});
+    projection.updateRequest({id: 'request', taskId: 'task', threadId: 'thread', turnId: 'turn', generation: 1,
+      serverRequestId: 1, kind: 'approval', method: 'item/commandExecution/requestApproval', purpose: 'owner_authorization',
+      ownerUserId: 'owner', requesterUserId: 'a', riskSummary: 'private operation detail', payload: {command: 'private command'},
+      status: 'pending', createdAt: '2026-11-21T00:00:00Z', expiresAt: '2026-11-22T00:00:00Z',
+      operationCard: {status: 'sent', messageId: 'private-card', messageAppLink: 'https://example.test/private-card', at: 'now'}});
+    const snapshot = JSON.stringify(projection.get('task'));
+    expect(snapshot).not.toContain('private operation');
+    expect(snapshot).not.toContain('private-card');
+    expect(snapshot).toContain('等待所有者处理');
+  });
   it('keeps process sources and summary parts separate with at most three recent previews', () => {
     const p = new LiveTurnProjection();
     p.append({ type: 'turn.started', taskId: 'task', threadId: 'thread', turnId: 'turn' });

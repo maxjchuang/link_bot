@@ -221,7 +221,13 @@ export interface MediaConfig {
 }
 
 
+export type PersonalAgentConfig =
+  | { enabled: false; ownerUserId?: string }
+  | { enabled: true; ownerUserId: string };
+
 export interface BotConfig {
+  /** Absent on legacy callers/configurations; normalization defaults to disabled. */
+  personalAgent?: PersonalAgentConfig;
   feishu: {
     appId: string;
     appSecret: string;

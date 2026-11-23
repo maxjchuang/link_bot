@@ -68,6 +68,8 @@ export interface TaskActorContext {
   taskPurpose?: string;
   /** Internal workflow policy; pins this task to one execution profile. */
   fixedExecutionProfile?: ExecutionProfile;
+  /** Internal admission snapshot, never accepted from message text or card values. */
+  groupServiceVersion?: number;
 }
 
 export interface DiskControlOperations {
@@ -322,7 +324,7 @@ export class FeishuTaskController {
   }
 }
 
-function actorContext(input: Pick<FeishuIncomingMessage, 'chatId' | 'chatType' | 'userId' | 'threadId' | 'messageId' | 'rootId' | 'createdAt' | 'resources'>): TaskActorContext {
+function actorContext(input: Pick<FeishuIncomingMessage, 'chatId' | 'chatType' | 'userId' | 'threadId' | 'messageId' | 'rootId' | 'createdAt' | 'resources'|'groupServiceVersion'>): TaskActorContext {
   return {
     chatId: input.chatId, chatType: input.chatType, userId: input.userId,
     ...(input.threadId ? { topicId: input.threadId } : {}),
@@ -330,6 +332,7 @@ function actorContext(input: Pick<FeishuIncomingMessage, 'chatId' | 'chatType' |
     ...(input.rootId ? { rootId: input.rootId } : {}),
     ...(input.createdAt ? { createdAt: input.createdAt } : {}),
     ...(input.resources?.length ? { resources: input.resources } : {}),
+    ...(input.groupServiceVersion !== undefined ? {groupServiceVersion: input.groupServiceVersion} : {}),
   };
 }
 

@@ -16,7 +16,14 @@ export class ConversationTaskService {
   constructor(
     private readonly store: SqliteStateStore,
     private readonly clock: () => Date = () => new Date(),
+    private readonly personalAgent?: {agentId: string; ownerUserId: string},
   ) {}
+
+  /** Scope grant is checked without replacing the authenticated request actor. */
+  executionOwnerFor(input: TaskActorContext): string {
+    this.identity(input);
+    return this.personalAgent?.ownerUserId ?? input.userId;
+  }
 
   async getOrCreate(input: TaskActorContext & {
     projectId?: string; mode?: 'chat' | 'project'; baseRef?: string; workspacePlan?: WorkspacePlan;
@@ -27,14 +34,16 @@ export class ConversationTaskService {
       throw new Error('Chat task requires a project-free user sandbox.');
     }
     if (mode === 'project' && !input.projectId) throw new Error('Project task requires projectId.');
-    const identity = conversationTaskIdentity(input);
+    const identity = this.identity(input);
     return this.store.withTaskLock(`scope:${identity.scopeKey}`, async () => {
+      this.assertService(input);
       const existingScope = this.store.getTaskScopeByKey(identity.scopeKey)
-        ?? this.resolveLegacyScope(input);
+        ?? (this.personalAgent ? undefined : this.resolveLegacyScope(input));
       if (existingScope) {
         const task = this.store.getTask(existingScope.taskId);
         if (!task) throw new Error(`Conversation scope references missing task: ${identity.scopeKey}`);
         if (!this.isExpiredLegacyConversation(task, existingScope, identity.scopeKey)) {
+          this.assertTaskMode(task);
           this.observeAuthenticatedActor(task, existingScope, input.userId);
           return { task, scope: existingScope, created: false };
         }
@@ -44,12 +53,14 @@ export class ConversationTaskService {
       const taskId = taskIdForScope(identity.scopeKey);
       const task: TaskRecord = {
         id: taskId,
-        ownerUserId: input.userId,
+        ownerUserId: this.personalAgent?.ownerUserId ?? input.userId,
+        ...(this.personalAgent ? {identityMode: 'personal-agent' as const, agentOwnerUserId: this.personalAgent.ownerUserId} : {}),
+        ...(this.personalAgent && input.chatType === 'group' ? {groupServiceVersion: input.groupServiceVersion} : {}),
         mode,
         runtimeMode: input.runtimeMode ?? 'legacy-task-container',
         ...(input.sandboxWorkspaceLayout ? { sandboxWorkspaceLayout: input.sandboxWorkspaceLayout } : {}),
         baseRef: mode === 'chat' ? '' : input.baseRef ?? 'main',
-        branchName: mode === 'chat' ? '' : `codex/${input.userId}/${taskId}`,
+        branchName: mode === 'chat' ? '' : `codex/${this.personalAgent?.ownerUserId ?? input.userId}/${taskId}`,
         ...(mode === 'project' ? {
           projectId: input.projectId!,
         } : {}),
@@ -67,26 +78,70 @@ export class ConversationTaskService {
         createdAt: now,
         updatedAt: now,
       };
-      const membership = membershipRecord(taskId, input.userId, 'owner', now);
-      this.store.createConversationTask({ task, scope, membership });
-      return { task, scope, created: true };
+      const membership = membershipRecord(taskId, task.ownerUserId, 'owner', now);
+      const created = this.store.createConversationTask({ task, scope, membership,
+        participants: input.userId !== task.ownerUserId ? [membershipRecord(taskId, input.userId, 'member', now)] : [],
+        ...(this.personalAgent && input.chatType === 'group' ? {groupServiceFence: {
+          agentId: this.personalAgent.agentId, ownerUserId: this.personalAgent.ownerUserId,
+          chatId: input.chatId, version: input.groupServiceVersion!,
+        }} : {}),
+      });
+      const persisted = this.store.getTask(taskId)!;
+      this.assertTaskMode(persisted);
+      this.observeAuthenticatedActor(persisted, scope, input.userId);
+      return {task: persisted, scope: this.store.getTaskScope(taskId)!, created};
     });
   }
 
   resolve(input: TaskActorContext): ConversationTaskResult | undefined {
-    const identity = conversationTaskIdentity(input);
-    const scope = this.store.getTaskScopeByKey(identity.scopeKey) ?? this.resolveLegacyScope(input);
+    const identity = this.identity(input);
+    const scope = this.store.getTaskScopeByKey(identity.scopeKey) ?? (this.personalAgent ? undefined : this.resolveLegacyScope(input));
     if (!scope) return undefined;
     const task = this.store.getTask(scope.taskId);
     if (!task) throw new Error(`Conversation scope references missing task: ${identity.scopeKey}`);
+    this.assertTaskMode(task);
     return { task, scope, created: false };
   }
 
   shouldStartSuccessor(input: TaskActorContext): boolean {
     const resolved = this.resolve(input);
     return Boolean(resolved && this.isExpiredLegacyConversation(
-      resolved.task, resolved.scope, conversationTaskIdentity(input).scopeKey,
+      resolved.task, resolved.scope, this.identity(input).scopeKey,
     ));
+  }
+
+  private identity(input: TaskActorContext): ReturnType<typeof conversationTaskIdentity> {
+    if (!this.personalAgent) return conversationTaskIdentity(input);
+    this.assertService(input);
+    const {agentId} = this.personalAgent;
+    if (!agentId || !this.personalAgent.ownerUserId) throw new Error('Personal-agent identity is required.');
+    const purpose = input.taskPurpose ? `:purpose:${createHash('sha256').update(input.taskPurpose).digest('hex').slice(0, 16)}` : '';
+    if (input.chatType === 'private') return {scope: 'private', scopeKey: `agent-private:${agentId}:${input.userId}${purpose}`,
+      chatId: input.chatId, privateUserId: input.userId};
+    return input.topicId
+      ? {scope: 'topic', scopeKey: `agent-topic:${agentId}:${input.chatId}:${input.topicId}:service:${input.groupServiceVersion}${purpose}`, chatId: input.chatId, topicId: input.topicId}
+      : {scope: 'group', scopeKey: `agent-group:${agentId}:${input.chatId}:service:${input.groupServiceVersion}${purpose}`, chatId: input.chatId};
+  }
+
+  private assertService(input: TaskActorContext): void {
+    if (!this.personalAgent) return;
+    if (input.chatType === 'private') {
+      if (input.userId !== this.personalAgent.ownerUserId) throw new Error('Personal-agent private chat requires owner.');
+      return;
+    }
+    const grant = this.store.getGroupService(this.personalAgent.agentId, input.chatId);
+    if (!grant || grant.status !== 'enabled' || grant.ownerUserId !== this.personalAgent.ownerUserId
+      || !Number.isSafeInteger(input.groupServiceVersion) || grant.version !== input.groupServiceVersion) {
+      throw new Error('Group service is not current.');
+    }
+  }
+
+  private assertTaskMode(task: TaskRecord): void {
+    if (this.personalAgent && (task.identityMode !== 'personal-agent' || task.agentOwnerUserId !== this.personalAgent.ownerUserId
+      || task.ownerUserId !== this.personalAgent.ownerUserId || task.runtimeMode !== 'user-sandbox')) {
+      throw new Error('Personal-agent task identity mismatch.');
+    }
+    if (!this.personalAgent && task.identityMode === 'personal-agent') throw new Error('Personal-agent task requires personal-agent service.');
   }
 
   private isExpiredLegacyConversation(task: TaskRecord, scope: TaskScopeRecord, personalScopeKey: string): boolean {
@@ -108,6 +163,10 @@ export class ConversationTaskService {
   }
 
   observeAuthenticatedActor(task: TaskRecord, scope: TaskScopeRecord, userId: string): TaskMembershipRecord {
+    this.assertTaskMode(task);
+    if (scope.taskId !== task.id) {
+      throw new Error('Task participant scope mismatch.');
+    }
     if (scope.scope === 'private' && scope.privateUserId !== userId) throw new Error('Private task identity mismatch.');
     const current = this.store.getTaskMembership(task.id, userId);
     if (current?.status === 'active') return current;
@@ -119,10 +178,21 @@ export class ConversationTaskService {
     return membership;
   }
 
-  authorize(taskId: string, userId: string, action: ConversationTaskAction): TaskMembershipRecord {
+  authorize(taskId: string, userId: string, action: ConversationTaskAction, groupServiceVersion?: number): TaskMembershipRecord {
+    const task = this.store.getTask(taskId);
+    if (!task) throw new Error('Task not found.');
+    this.assertTaskMode(task);
+    if (this.personalAgent) {
+      const scope = this.store.getTaskScope(taskId);
+      if (!scope?.chatId) throw new Error('Task scope is required.');
+      this.assertService({userId, chatId: scope.chatId, chatType: scope.scope === 'private' ? 'private' : 'group',
+        groupServiceVersion});
+    }
     const membership = this.store.getTaskMembership(taskId, userId);
     if (!membership || membership.status !== 'active') throw new Error('Task membership is not active.');
-    if (isPrivileged(action) && membership.role === 'member') {
+    if (this.personalAgent && ['delete','membership','memory_admin','global_memory'].includes(action)
+      && userId !== this.personalAgent.ownerUserId) throw new Error('Task action requires agent owner.');
+    if (!this.personalAgent && isPrivileged(action) && membership.role === 'member') {
       throw new Error(`Task action requires owner or administrator: ${action}`);
     }
     return membership;

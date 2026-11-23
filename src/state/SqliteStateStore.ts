@@ -22,6 +22,8 @@ UserSandboxRecord,
 WorkspaceSpecRecord,
 } from '../tasks/TaskTypes.js';
 import { migrateSqliteSchema } from './SqliteSchema.js';
+import {assertTaskIdentityTransition} from '../security/AgentExecutionIdentity.js';
+import type {GroupServiceRecord, GroupServiceTransition} from '../security/GroupServiceTypes.js';
 
 export interface ReadySlotRecord {
   id: string;
@@ -81,6 +83,40 @@ export class SqliteStateStore {
 
   close(): void {
     this.db.close();
+  }
+
+  getGroupService(agentId: string, chatId: string): GroupServiceRecord | undefined {
+    return payloadRow<GroupServiceRecord>(this.db.prepare(
+      'SELECT payload FROM group_services WHERE agent_id=? AND chat_id=?').get(agentId, chatId));
+  }
+
+  applyGroupServiceTransition(input: GroupServiceTransition): GroupServiceRecord | undefined {
+    if (!input.agentId || !input.chatId || !input.ownerUserId || !input.eventId
+      || !Number.isSafeInteger(input.occurredAt) || input.occurredAt <= 0
+      || !Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 0
+      || !['pending','enabled','revoked'].includes(input.status)
+      || !['lifecycle','owner'].includes(input.source)) throw new Error('Invalid group service transition.');
+    return this.db.transaction(() => {
+      const current = this.getGroupService(input.agentId, input.chatId);
+      if (current && current.ownerUserId !== input.ownerUserId) throw new Error('Group service owner is immutable.');
+      const seen = this.db.prepare(`INSERT OR IGNORE INTO group_service_events(agent_id,event_id,chat_id)
+        VALUES(?,?,?)`).run(input.agentId, input.eventId, input.chatId).changes === 0;
+      if (seen) return current;
+      // A removal must never depend on a stale membership result. Other writes
+      // use CAS so verification cannot outlive a concurrent disable/removal.
+      const removal = input.source === 'lifecycle' && input.status === 'revoked';
+      if (!removal && (current?.version ?? 0) !== input.expectedVersion) return current;
+      if (current && (input.occurredAt < current.occurredAt
+        || (input.occurredAt === current.occurredAt && input.source === 'lifecycle'
+          && !removal && (current.status === 'revoked' || current.source === 'owner')))) return current;
+      const {expectedVersion: _, ...fields} = input;
+      const record: GroupServiceRecord = {...fields, version: (current?.version ?? 0) + 1};
+      this.db.prepare(`INSERT INTO group_services(agent_id,chat_id,owner_user_id,status,version,payload)
+        VALUES(?,?,?,?,?,?) ON CONFLICT(agent_id,chat_id) DO UPDATE SET
+        status=excluded.status,version=excluded.version,payload=excluded.payload`)
+        .run(record.agentId, record.chatId, record.ownerUserId, record.status, record.version, json(record));
+      return record;
+    }).immediate();
   }
 
   getDynamicProject(projectId: string): DynamicProjectRecord | undefined {
@@ -331,11 +367,14 @@ export class SqliteStateStore {
   }
 
   saveTask(task: TaskRecord): void {
+    // Keep the identity check and upsert atomic across gateway/host-manager connections.
+    this.db.transaction(() => {
     if (task.mode === 'chat' && (task.projectId !== undefined || task.runtimeMode !== 'user-sandbox')) {
       throw new Error('Chat task must be an unbound user-sandbox task.');
     }
     if (task.mode !== 'chat' && !task.projectId) throw new Error('Project task requires projectId.');
     const existing = this.getTask(task.id);
+    assertTaskIdentityTransition(existing, task);
     const existingMode = existing?.runtimeMode ?? 'legacy-task-container';
     const nextMode = task.runtimeMode ?? 'legacy-task-container';
     if (existing && existingMode !== nextMode) {
@@ -348,6 +387,7 @@ export class SqliteStateStore {
         runtime_state=excluded.runtime_state, last_user_interaction_at=excluded.last_user_interaction_at,
         payload=excluded.payload, updated_at=excluded.updated_at
     `).run({ ...task, projectId: task.projectId ?? '', payload: json(task) });
+    }).immediate();
   }
 
   saveUserSandbox(record: UserSandboxRecord): void {
@@ -478,7 +518,9 @@ export class SqliteStateStore {
     return this.db.transaction(() => {
       const current = this.getTask(taskId);
       if (!current) return undefined;
+      const previousIdentity = {...current};
       const next = updater(current);
+      assertTaskIdentityTransition(previousIdentity, next);
       this.saveTask(next);
       return next;
     }).immediate();
@@ -488,6 +530,7 @@ export class SqliteStateStore {
     return this.db.transaction(() => {
       const task = this.getTask(taskId);
       if (!task || task.runtimeMode !== 'user-sandbox') return undefined;
+      if (task.identityMode === 'personal-agent') throw new Error('A personal-agent task cannot fall back to a legacy runtime.');
       const hasTurns = Boolean(this.db.prepare('SELECT 1 FROM turns WHERE task_id=? LIMIT 1').get(taskId));
       if (task.sandboxId || task.runtimeId || task.codexThreadId || task.activeTurnId || hasTurns) {
         throw new Error('User sandbox fallback is no longer safe after runtime or turn ownership was established.');
@@ -567,13 +610,23 @@ export class SqliteStateStore {
     task: TaskRecord;
     scope: TaskScopeRecord;
     membership: TaskMembershipRecord;
-  }): void {
-    this.db.transaction(() => {
-      if (this.getTaskScopeByKey(input.scope.scopeKey)) return;
+    participants?: TaskMembershipRecord[];
+    groupServiceFence?: {agentId: string; chatId: string; ownerUserId: string; version: number};
+  }): boolean {
+    return this.db.transaction(() => {
+      const fence = input.groupServiceFence;
+      if (fence) {
+        const grant = this.getGroupService(fence.agentId, fence.chatId);
+        if (!grant || grant.status !== 'enabled' || grant.ownerUserId !== fence.ownerUserId
+          || grant.version !== fence.version) throw new Error('Group service is not current.');
+      }
+      if (this.getTaskScopeByKey(input.scope.scopeKey)) return false;
       this.saveTask(input.task);
       this.saveTaskScope(input.scope);
       this.saveTaskMembership(input.membership);
-    })();
+      for (const member of input.participants ?? []) this.saveTaskMembership(member);
+      return true;
+    }).immediate();
   }
 
   getTaskScope(taskId: string): TaskScopeRecord | undefined {
@@ -1063,11 +1116,12 @@ export class SqliteStateStore {
     })();
   }
 
-  invalidateAppServerRequests(taskId: string, activeGeneration: number): AppServerRequestRecord[] {
+  invalidateAppServerRequests(taskId: string, activeGeneration: number, preserveDetached = false): AppServerRequestRecord[] {
     return this.db.transaction(() => {
       const rows = this.db.prepare(`
         SELECT payload FROM approvals WHERE task_id=? AND generation<>? AND status IN ('pending','decided')
-      `).all(taskId, activeGeneration).map(payloadRowRequired<AppServerRequestRecord>);
+      `).all(taskId, activeGeneration).map(payloadRowRequired<AppServerRequestRecord>)
+        .filter(request => !preserveDetached || !request.continuation);
       const now = this.clock().toISOString();
       for (const request of rows) this.saveAppServerRequest({
         ...request, status: 'connection_lost', invalidatedAt: now,

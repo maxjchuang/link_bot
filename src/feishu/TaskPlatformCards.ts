@@ -163,7 +163,10 @@ export function renderAppServerRequestCard(
   const elements: Array<Record<string, unknown>> = [
     { tag: 'markdown', content: `**${request.kind === 'approval' ? 'Approval required' : 'Input required'}**\n${request.riskSummary}\nExpires: ${request.expiresAt}` },
   ];
-  if (request.kind === 'approval') {
+  if (request.continuation?.replayable === false) {
+      elements.push({tag: 'markdown', content: '原操作已取消，不会阻塞群内其他任务。缺少完整可核验的操作快照，不能通过此卡自动恢复；请所有者核对现状后发起新请求。'},
+        decisionButton('关闭此事项', 'default', {...baseValue, decision: 'deny'}));
+  } else if (request.kind === 'approval') {
     elements.push(
       decisionButton('Allow', 'primary', { ...baseValue, decision: 'allow' }),
       decisionButton('Deny', 'danger', { ...baseValue, decision: 'deny' }),

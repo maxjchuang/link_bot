@@ -6,6 +6,7 @@ import type { FeishuGateway } from '../feishu/FeishuGateway.js';
 import { DetailSanitizer, sanitizePublicAnswerText } from './DetailSanitizer.js';
 
 export interface SensitiveReplyContext {
+  identityMode?: 'legacy' | 'personal-agent';
   requesterUserId: string;
   ownerUserId: string;
   chatId: string;
@@ -31,6 +32,7 @@ export class SensitiveReplyDelivery {
   }
 
   async prepare(context: SensitiveReplyContext, text: string): Promise<string> {
+    if (context.identityMode === 'personal-agent') return sanitizePublicAnswerText(text);
     const key = JSON.stringify([context.chatId, context.sourceMessageId, context.requesterUserId]);
     const prior = this.preparations.get(key);
     if (prior) return prior;

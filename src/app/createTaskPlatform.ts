@@ -4,6 +4,11 @@ import { realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AppServerRequestService } from '../approvals/AppServerRequestService.js';
+import {agentIdForApp, resolveAgentExecutionIdentity, resolveTaskExecutionOwner} from '../security/AgentExecutionIdentity.js';
+import {GroupService} from '../security/GroupService.js';
+import {PersonalAgentAdmission} from '../security/PersonalAgentAdmission.js';
+import {assertPersonalAgentWorkCurrent} from '../security/PersonalAgentWorkFence.js';
+import type {GroupLifecycleEvent} from '../security/GroupServiceTypes.js';
 import type { AppServerRuntimeFactory } from '../appserver/AppServerCodexBackend.js';
 import { AppServerCodexBackend } from '../appserver/AppServerCodexBackend.js';
 import { dockerAttachRuntimeFactory } from '../appserver/AppServerDockerRuntime.js';
@@ -69,6 +74,7 @@ import { TaskCredentialManager } from '../runtime/TaskCredentialManager.js';
 import { TaskDiskCleanupController } from '../runtime/TaskDiskCleanupController.js';
 import { UserSandboxDockerRuntime } from '../runtime/UserSandboxDockerRuntime.js';
 import { UserSandboxManager } from '../runtime/UserSandboxManager.js';
+import {SandboxSupervisorClient} from '../runtime/SandboxSupervisorClient.js';
 import { UserSandboxReclaimer } from '../runtime/UserSandboxReclaimer.js';
 import { modeAwareTaskProvisioner,UserSandboxTaskProvisioner } from '../runtime/UserSandboxTaskProvisioner.js';
 import { SqliteStateStore } from '../state/SqliteStateStore.js';
@@ -80,6 +86,10 @@ import { taskMode,type TaskRecord } from '../tasks/TaskTypes.js';
 import { taskPlatformEnabledFor,taskPlatformProjectEnabled } from './TaskPlatformRollout.js';
 
 export interface TaskPlatformApplication {
+  allowsPersonalDetailAction?(action: import('../feishu/FeishuCardActions.js').FeishuIncomingCardAction): Promise<boolean>;
+  admitPersonalMessage?(message: FeishuIncomingMessage): Promise<FeishuIncomingMessage | undefined>;
+  handlePersonalOwnerCommand?(message: FeishuIncomingMessage): Promise<{text: string} | undefined>;
+  handleGroupLifecycle?(event: GroupLifecycleEvent): Promise<void>;
   controller: Pick<FeishuTaskController, 'handleMessage' | 'handleCardAction'> & Partial<Pick<FeishuTaskController, 'handleTopicClosed'>>;
   store: SqliteStateStore;
   diskMaintenance: Pick<TaskDiskCleanupController, 'inventory'>;
@@ -215,13 +225,16 @@ export function createTaskPlatform(input: CreateTaskPlatformInput): TaskPlatform
     hostGid: process.getgid?.() ?? 0,
     authFile: resolveOptionalAuthFile(input.codexHomes.global),
     publicationPolicyFile: join(input.projectRoot,'.link-bot/publication-policy.json'),
+    ...(input.config.personalAgent?.enabled ? {agentIdentity: {
+      appId: input.config.feishu.appId, ownerUserId: input.config.personalAgent.ownerUserId,
+    }} : {}),
     environment: {
       ...runtimeProxyEnvironment(process.env),
     },
   }, dockerRunner, input.dependencies?.waitForSocket);
   const userSandboxManager = new UserSandboxManager(store, userSandboxDocker, { clock });
   const provisioner = modeAwareTaskProvisioner(
-    store, legacyProvisioner, new UserSandboxTaskProvisioner(store, userSandboxManager),
+    store, legacyProvisioner, new UserSandboxTaskProvisioner(store, userSandboxManager, input.config),
     userSandboxConfig.legacyFallbackEnabled,
   );
   const legacyRuntimeFactory = input.dependencies?.runtimeFactory ?? dockerAttachRuntimeFactory((taskId) => {
@@ -232,7 +245,8 @@ export function createTaskPlatform(input: CreateTaskPlatformInput): TaskPlatform
     resolveTarget: async (taskId) => {
       const task = store.getTask(taskId);
       if (!task || task.runtimeMode !== 'user-sandbox') throw new Error(`User sandbox task not found: ${taskId}`);
-      const ensured = await userSandboxManager.ensure(task.ownerUserId);
+      assertPersonalAgentWorkCurrent(input.config, store, task, {createdBy: task.ownerUserId, groupServiceVersion: task.groupServiceVersion});
+      const ensured = await userSandboxManager.ensure(resolveTaskExecutionOwner(input.config, task));
       return {
         sandboxGeneration: ensured.sandbox.generation,
         supervisorSocketPath: ensured.runtime.supervisorSocketPath,
@@ -241,7 +255,8 @@ export function createTaskPlatform(input: CreateTaskPlatformInput): TaskPlatform
     recoverTarget: async (taskId) => {
       const task = store.getTask(taskId);
       if (!task || task.runtimeMode !== 'user-sandbox') throw new Error(`User sandbox task not found: ${taskId}`);
-      const recycled = await userSandboxManager.recycle(task.ownerUserId);
+      assertPersonalAgentWorkCurrent(input.config, store, task, {createdBy: task.ownerUserId, groupServiceVersion: task.groupServiceVersion});
+      const recycled = await userSandboxManager.recycle(resolveTaskExecutionOwner(input.config, task));
       store.updateTask(task.id, (current) => ({
         ...current, sandboxId: recycled.sandbox.id, sandboxGeneration: recycled.sandbox.generation,
         updatedAt: clock().toISOString(),
@@ -285,7 +300,7 @@ export function createTaskPlatform(input: CreateTaskPlatformInput): TaskPlatform
     generationAllocator: async (start) => {
       const task = store.getTask(start.taskId);
       if (task?.runtimeMode !== 'user-sandbox') return ++legacyProcessGeneration;
-      const ensured = await userSandboxManager.ensure(task.ownerUserId);
+      const ensured = await userSandboxManager.ensure(resolveTaskExecutionOwner(input.config, task));
       const allocated = store.allocateUserSandboxTaskProcessGeneration({
         taskId: task.id, expectedSandboxGeneration: ensured.sandbox.generation,
       });
@@ -308,16 +323,59 @@ export function createTaskPlatform(input: CreateTaskPlatformInput): TaskPlatform
     return { containerName: docker.describe(task.runtimeId ?? task.id).containerName, workspaceRoot: sourceWorkspaceRoot(task)! };
   }));
   const resolveSourceReferences = (taskId: string, markdown: string) => sourceReferences.resolveMarkdown(taskId, markdown);
+  const authorizeDetailIdentity = async (identity: import('../details/TurnDetailTypes.js').DetailTurnIdentity, userId: string) => {
+    const task = identity.ownerKind === 'task_platform' ? store.getTask(identity.taskId) : undefined;
+    if (task?.identityMode !== 'personal-agent') {
+      if (input.config.personalAgent?.enabled && userId !== input.config.personalAgent.ownerUserId) throw new Error('access_denied');
+      return;
+    }
+    const turn = store.getTurn(identity.localTurnId);
+    if (!turn || turn.taskId !== task.id) throw new Error('access_denied');
+    assertPersonalAgentWorkCurrent(input.config, store, task, turn);
+    const scope = store.getTaskScope(task.id)!;
+    if (scope.scope !== 'private' && !await input.gateway.isDetailReaderMember?.(scope.chatId!, userId)) throw new Error('access_denied');
+    if (scope.scope === 'private' && userId !== task.agentOwnerUserId) throw new Error('access_denied');
+    assertPersonalAgentWorkCurrent(input.config, store, task, turn);
+  };
   const turnArtifacts = mediaConfig.enabled && mediaConfig.maxFileBytes >= 256 && turnDetails?.store && turnDetails.resources && turnDetails.results
     && input.gateway.uploadFile && input.gateway.sendDetailFileToTarget
     ? new TurnDetailArtifactService(turnDetails.store, turnDetails.resources, turnDetails.results,
       (actor) => artifactAccessPolicy(input.gateway, actor), input.gateway, media, clock,
-      Math.min(mediaConfig.maxFileBytes, 50 * 1024 * 1024), turnDetails.telemetry, turnDetails.audit) : undefined;
-  const outbox = new FeishuOutbox(store, new FeishuGatewayOutboxTransport(input.gateway, store, media, resolveSourceReferences, turnArtifacts, turnDetails.telemetry, clock), clock);
+      Math.min(mediaConfig.maxFileBytes, 50 * 1024 * 1024), turnDetails.telemetry, turnDetails.audit, authorizeDetailIdentity) : undefined;
+  const outbox = new FeishuOutbox(store, new FeishuGatewayOutboxTransport(input.gateway, store, media, resolveSourceReferences, turnArtifacts, turnDetails.telemetry, clock), clock,
+    async record => {
+      const payload = record.payload && typeof record.payload === 'object' ? record.payload as Record<string, unknown> : {};
+      const request = typeof payload.requestId === 'string' ? store.getAppServerRequest(payload.requestId) : undefined;
+      const attachment = typeof payload.attachmentId === 'string' ? media.getAttachment(payload.attachmentId) : undefined;
+      const artifact = payload.kind === 'turn_detail_artifact' && payload.request && typeof payload.request === 'object'
+        ? payload.request as import('../details/TurnDetailArtifactService.js').TurnArtifactRequest : undefined;
+      const cardRow = typeof payload.recordId === 'string' ? store.db.prepare('SELECT payload FROM live_cards WHERE id=?').get(payload.recordId) as {payload: string}|undefined : undefined;
+      const card = cardRow ? JSON.parse(cardRow.payload) as import('../livecards/AppServerTurnCardStore.js').AppServerTurnCardRecord : undefined;
+      const taskId = typeof payload.taskId === 'string' ? payload.taskId : request?.taskId ?? attachment?.taskId ?? card?.taskId ?? artifact?.identity.taskId;
+      const task = taskId ? store.getTask(taskId) : undefined;
+      if (!task && input.config.personalAgent?.ownerUserId) return record.target.receiveIdType === 'open_id'
+        && record.target.chatId === input.config.personalAgent.ownerUserId;
+      if (task?.identityMode !== 'personal-agent') return !task || !input.config.personalAgent?.ownerUserId
+        || !input.config.personalAgent.enabled && task.ownerUserId === input.config.personalAgent.ownerUserId;
+      if (!input.config.personalAgent?.enabled || task.agentOwnerUserId !== input.config.personalAgent.ownerUserId) return false;
+      const scope = store.getTaskScope(task.id);
+      if (!scope?.chatId) return false;
+      if (request?.purpose === 'owner_authorization') {
+        if (record.target.receiveIdType !== 'open_id' || record.target.chatId !== task.agentOwnerUserId) return false;
+      } else if (!artifact && (record.target.chatId !== scope.chatId || record.target.topicId !== scope.topicId)) return false;
+      if (scope.scope === 'private') return true;
+      const turnId = typeof payload.turnId === 'string' ? payload.turnId : request?.localTurnId ?? attachment?.turnId ?? card?.localTurnId ?? artifact?.identity.localTurnId;
+      const turn = turnId ? store.getTurn(turnId) : undefined;
+      if (!turn || turn.taskId !== task.id || !turn.groupServiceVersion) return false;
+      try {assertPersonalAgentWorkCurrent(input.config, store, task, turn); return true;} catch {return false;}
+    });
   const taskDiskCleanup = new TaskDiskCleanupController(
     input.config.diskPolicy, store, docker, diagnostics, clock,
   );
   const approvals = new AppServerRequestService(store, backend, new FeishuApprovalOutboxRenderer(outbox, (request) => {
+    if (request.purpose === 'owner_authorization') return {
+      chatId: request.ownerUserId, receiveIdType: 'open_id' as const, chatType: 'private' as const,
+    };
     const binding = store.getLatestTaskBinding(request.taskId);
     if (!binding) return { chatId: request.ownerUserId, receiveIdType: 'open_id' as const, mentionUserId: request.ownerUserId };
     return {
@@ -328,7 +386,18 @@ export function createTaskPlatform(input: CreateTaskPlatformInput): TaskPlatform
         ? { replyInThread: true, mentionUserId: request.ownerUserId, topicId: binding.topicId }
         : binding.chatType === 'group' ? { mentionUserId: request.ownerUserId } : {}),
     };
-  }), 300_000, clock);
+  }), 300_000, clock, (task, turn) => {
+    const scope = store.getTaskScope(task.id);
+    if (!scope) throw new Error('Personal-agent approval scope unavailable.');
+    const identity = resolveAgentExecutionIdentity({config: input.config, task, scope,
+      requesterUserId: turn.createdBy, groupServiceVersion: turn.groupServiceVersion});
+    if (identity.audience.chatType === 'group') {
+      const grant = store.getGroupService(identity.agentId, identity.audience.chatId);
+      if (grant?.status !== 'enabled' || grant.version !== turn.groupServiceVersion || grant.ownerUserId !== identity.agentOwnerUserId)
+        throw new Error('Personal-agent approval group service is not current.');
+    }
+    return identity;
+  });
   const resources = new ResourceController(
     store,
     input.dependencies?.hostSampler ?? (process.platform === 'darwin'
@@ -419,6 +488,19 @@ export function createTaskPlatform(input: CreateTaskPlatformInput): TaskPlatform
         },
       } : undefined,
       turnDetails.telemetry,
+      async record => {
+        const task = record.ownerKind === 'task_platform' ? store.getTask(record.taskId) : undefined;
+        if (task?.identityMode !== 'personal-agent') return !input.config.personalAgent?.ownerUserId
+          || record.ownerKind !== 'task_platform' || Boolean(task && !input.config.personalAgent.enabled
+            && task.ownerUserId === input.config.personalAgent.ownerUserId);
+        const turn = store.getTurn(record.localTurnId);
+        if (!turn || turn.taskId !== task.id) return false;
+        try {
+          assertPersonalAgentWorkCurrent(input.config, store, task, turn);
+          const scope = store.getTaskScope(task.id)!;
+          return record.target.chatId === scope.chatId && record.target.topicId === scope.topicId;
+        } catch {return false;}
+      },
     );
   const turnExperience = input.config.liveCards.enabled ? cardRecovery : undefined;
   const unsubscribeApprovalState = approvals.subscribe(async (request) => { await turnExperience?.requestChanged(request); });
@@ -449,6 +531,28 @@ export function createTaskPlatform(input: CreateTaskPlatformInput): TaskPlatform
     upgrade: (ownerId) => userSandboxManager.upgradeRuntime(ownerId),
   });
   service.setDynamicProjectCatalog(dynamicCatalog);
+  service.setPersonalMemberVerifier(async (chatId, userId) => await input.gateway.isDetailReaderMember?.(chatId, userId) === true);
+  service.setPersistedTaskStopper(async task => {
+    if (task.runtimeMode !== 'user-sandbox') {await provisioner.stop(task); return;}
+    const sandbox = store.getUserSandboxByOwner(task.ownerUserId);
+    if (!sandbox || sandbox.status !== 'running' || task.sandboxGeneration !== undefined
+      && sandbox.generation !== task.sandboxGeneration) return;
+    // Inspect the existing generation only. Never create or recycle a sandbox during revocation.
+    const runtime = userSandboxDocker.describe(sandbox);
+    if (await userSandboxDocker.observe(runtime) !== 'running') return;
+    const supervisor = new SandboxSupervisorClient(runtime.supervisorSocketPath);
+    const observed = await supervisor.inspectTask(task.id);
+    if (observed.status === 'not_found' || observed.status === 'exited' || observed.status === 'failed') return;
+    if (observed.taskId !== task.id || observed.sandboxGeneration !== sandbox.generation
+      || !Number.isSafeInteger(observed.processGeneration) || task.appServerProcessGeneration !== undefined
+        && observed.processGeneration !== task.appServerProcessGeneration) throw new Error('Revoked task process generation changed.');
+    await supervisor.stopTask({taskId: task.id, sandboxGeneration: sandbox.generation,
+      expectedProcessGeneration: observed.processGeneration, reason: 'personal_agent_work_revoked'});
+  });
+  approvals.setOwnerContinuation({
+    suspend: async request => {await backend.interruptTurn({taskId: request.taskId});},
+    resume: async request => {await service.resumeOwnerOperation(request);},
+  });
   service.setProjectImportInspector((ownerId,localPath,repositoryUrl)=>userSandboxManager.inspectExistingProject(ownerId,localPath,repositoryUrl));
   const creation = new ProjectCreationService(store, async (actor, request) => {
     const ensured = await userSandboxManager.ensure(actor.userId);
@@ -701,8 +805,44 @@ export function createTaskPlatform(input: CreateTaskPlatformInput): TaskPlatform
     diagnostics,
     clock,
   );
+  const personalAdmission = new PersonalAgentAdmission(input.config, store,
+    async (chatId, userId) => await input.gateway.isDetailReaderMember?.(chatId, userId) === true);
+  const groups = input.config.personalAgent?.enabled ? new GroupService({store,
+    agentId: agentIdForApp(input.config.feishu.appId), ownerUserId: input.config.personalAgent.ownerUserId,
+    verifyGroup: async (chatId, owner) => await input.gateway.verifyGroupServiceContext?.(chatId, owner) === true, clock,
+  }) : undefined;
   return {
+    allowsPersonalDetailAction: async action => {
+      if (action.action.kind !== 'turn_detail' || !input.config.personalAgent?.enabled || !action.messageId) return false;
+      const identity = turnDetails?.views?.resolveCard(action.action.cardRef);
+      if (!identity) return false;
+      try {
+        await authorizeDetailIdentity(identity, action.userId);
+        const source = await input.gateway.resolveDetailMessageScope?.(action.messageId);
+        const scope = store.getTaskScope(identity.taskId);
+        return Boolean(source && scope && source.chatId === action.chatId && source.chatId === scope.chatId
+          && source.topicId === scope.topicId);
+      } catch {return false;}
+    },
+    admitPersonalMessage: async message => {
+      const admitted = await personalAdmission.admit({chatId: message.chatId, chatType: message.chatType,
+        userId: message.userId, topicId: message.threadId, messageId: message.messageId});
+      if (!admitted) return undefined;
+      const {groupServiceVersion: _untrusted, ...incoming} = message;
+      return {...incoming, ...(admitted.groupServiceVersion !== undefined ? {groupServiceVersion: admitted.groupServiceVersion} : {})};
+    },
+    handlePersonalOwnerCommand: async message => {
+      const text = await groups?.handleOwnerCommand(message);
+      const target = /^\/agent\s+group\s+(?:enable|disable)\s+(oc_[A-Za-z0-9_-]+)$/.exec(message.text.trim());
+      if (text !== undefined && target) await service.reconcilePersonalAgentWork(target[1]);
+      return text === undefined ? undefined : {text};
+    },
+    handleGroupLifecycle: async event => {
+      await groups?.handleLifecycle(event);
+      await service.reconcilePersonalAgentWork(event.chatId);
+    },
     retrySensitiveReply: async (message) => {
+      if (input.config.personalAgent?.ownerUserId) return {text: '个人代理模式及其回退状态均不恢复旧请求者的敏感信息补发。'};
       const match = message.text.trim().match(/^\/retry-sensitive\s+([a-f0-9]{32})$/);
       return match ? { text: await sensitiveReplies.retry(match[1]!, message.userId) } : undefined;
     },
@@ -717,7 +857,7 @@ export function createTaskPlatform(input: CreateTaskPlatformInput): TaskPlatform
             outbox.enqueue({ dedupeKey: `detail-artifact:${createHash('sha256').update(JSON.stringify(request)).digest('hex')}`,
               target: { chatId: request.actor.userId, receiveIdType: 'open_id' }, eventType: 'media_send',
               payload: { kind: 'turn_detail_artifact', request } });
-          } } : undefined, turnDetails.telemetry, turnDetails.audit) : undefined,
+          } } : undefined, turnDetails.telemetry, turnDetails.audit, authorizeDetailIdentity) : undefined,
     ),
     store,
     diskMaintenance: taskDiskCleanup,
@@ -733,6 +873,8 @@ export function createTaskPlatform(input: CreateTaskPlatformInput): TaskPlatform
     },
     allowsAmbientMessage: (message) => ambientTopicAuthorizer.allows(message),
     shouldHandleMessage: (message) => {
+      if (input.config.personalAgent?.enabled && message.groupServiceVersion !== undefined)
+        return taskPlatformEnabledFor(input.config, input.config.personalAgent.ownerUserId);
       const text = message.text.replace(/^(?:@\S+(?:\s+|$))*/, '').trim();
       if (/^\/disk(?:\s|$)/i.test(text) && input.config.upgrade.adminUsers.includes(message.userId)) return true;
       if (message.chatType === 'group' && !message.wasMentioned
@@ -806,7 +948,7 @@ export function createTaskPlatform(input: CreateTaskPlatformInput): TaskPlatform
       await service.recoverStartup();
       await service.recoverProjectCreations();
       console.info('startup.task_recovery.phase=auth');
-      await authBroker.recoverPendingResumes();
+      if (!input.config.personalAgent?.ownerUserId) await authBroker.recoverPendingResumes();
       console.info('startup.task_recovery.phase=cards');
       await turnExperience?.recoverOpenCards('task_platform', async (record) => {
         const turn = store.getTurn(record.localTurnId);

@@ -14,6 +14,8 @@ import {
 } from '../livecards/LiveTurnCardTypes.js';
 import type { IncomingResourceDescriptor, MediaKind } from '../media/MediaTypes.js';
 import { timelineRegionUpdates } from '../livecards/TimelineRegionUpdates.js';
+import type {GroupLifecycleEvent} from '../security/GroupServiceTypes.js';
+import {normalizeGroupLifecycleEvent, type PlatformGroupLifecycleEvent} from './GroupLifecycleEvent.js';
 
 export interface FeishuIncomingMessage {
   chatId: string;
@@ -33,6 +35,8 @@ export interface FeishuIncomingMessage {
   botOpenIdResolved?: boolean;
   source?: 'message' | 'bot_menu';
   eventId?: string;
+  /** Set only after server-side admission; never copied from platform event/body fields. */
+  groupServiceVersion?: number;
 }
 
 export interface FeishuUserMention {
@@ -46,6 +50,8 @@ export type FeishuReactionType = string;
 
 export interface FeishuReplyTarget {
   chatId: string;
+  chatType?: 'private' | 'group';
+  topicId?: string;
   receiveIdType?: 'chat_id' | 'open_id';
   replyToMessageId?: string;
   replyInThread?: boolean;
@@ -57,6 +63,7 @@ export interface FeishuGateway extends CardKitGateway {
     onMessage: (message: FeishuIncomingMessage) => Promise<FeishuOutgoingReply>,
     onCardAction?: (action: FeishuIncomingCardAction) => Promise<FeishuOutgoingReply>,
     onTopicClosed?: (topic: { chatId: string; topicId: string; operatorUserId?: string }) => Promise<void>,
+    onGroupLifecycle?: (event: GroupLifecycleEvent) => Promise<void>,
   ): Promise<void>;
   sendText(chatId: string, text: string): Promise<void>;
   sendTextToTarget(target: FeishuReplyTarget, text: string): Promise<void>;
@@ -76,6 +83,7 @@ export interface FeishuGateway extends CardKitGateway {
   sendDetailFileToTarget?(target: FeishuReplyTarget, resourceKey: string, uuid: string): Promise<{ messageId: string }>;
   resolveDetailMessageScope?(messageId: string): Promise<{ chatId: string; chatType: 'private' | 'group'; topicId?: string } | undefined>;
   isDetailReaderMember?(chatId: string, userId: string): Promise<boolean>;
+  verifyGroupServiceContext?(chatId: string, ownerUserId: string): Promise<boolean>;
   replaceDetailMessageCard?(messageId: string, card: Record<string, unknown>): Promise<void>;
   updateMessageCard(
     messageId: string,
@@ -227,6 +235,8 @@ interface EventDispatcherLike {
     'card.action.trigger'?: (data: LarkCardActionEvent) => Promise<LarkCardActionCallbackResponse | void>;
     'application.bot.menu_v6'?: (data: LarkBotMenuEvent) => Promise<void>;
     'im.message.reaction.created_v1'?: (data: LarkReactionCreatedEvent) => Promise<void>;
+    'im.chat.member.bot.added_v1'?: (data: PlatformGroupLifecycleEvent) => Promise<void>;
+    'im.chat.member.bot.deleted_v1'?: (data: PlatformGroupLifecycleEvent) => Promise<void>;
   }) => unknown;
 }
 
@@ -273,7 +283,7 @@ export class LarkLongConnectionGateway implements FeishuGateway {
   private botOpenId?: string;
   private readonly p2pChatIdsByUser = new Map<string, string>();
 
-  constructor(appId: string, appSecret: string, deps?: LarkGatewayDeps) {
+  constructor(private readonly appId: string, appSecret: string, deps?: LarkGatewayDeps) {
     this.client = deps?.client ?? new lark.Client({ appId, appSecret });
     // The SDK logs complete Axios errors (including request bodies) by default.
     // Sensitive delivery must not leak payloads through that lower-level logger.
@@ -292,10 +302,19 @@ export class LarkLongConnectionGateway implements FeishuGateway {
     onMessage: (message: FeishuIncomingMessage) => Promise<FeishuOutgoingReply>,
     onCardAction?: (action: FeishuIncomingCardAction) => Promise<FeishuOutgoingReply>,
     onTopicClosed?: (topic: { chatId: string; topicId: string; operatorUserId?: string }) => Promise<void>,
+    onGroupLifecycle?: (event: GroupLifecycleEvent) => Promise<void>,
   ): Promise<void> {
     this.botOpenId = await this.resolveBotOpenId();
     const dispatcher = this.createEventDispatcher();
     dispatcher.register({
+        'im.chat.member.bot.added_v1': async data => {
+          const event = normalizeGroupLifecycleEvent(data, this.appId, 'added');
+          if (event && onGroupLifecycle) await onGroupLifecycle(event);
+        },
+        'im.chat.member.bot.deleted_v1': async data => {
+          const event = normalizeGroupLifecycleEvent(data, this.appId, 'removed');
+          if (event && onGroupLifecycle) await onGroupLifecycle(event);
+        },
         'im.message.reaction.created_v1': async (data) => {
           const event = data.event;
           if (!onTopicClosed || event?.reaction_type?.emoji_type?.toUpperCase() !== 'DONE' || !event.message_id) return;
@@ -737,6 +756,13 @@ export class LarkLongConnectionGateway implements FeishuGateway {
     if (chat.chat_mode === 'p2p') return { chatId: item.chat_id, chatType: 'private' };
     if (chat.chat_mode !== 'group' && chat.chat_mode !== 'topic') throw new Error('access_unavailable');
     return { chatId: item.chat_id, chatType: 'group', ...(typeof item.thread_id === 'string' ? { topicId: item.thread_id } : {}) };
+  }
+
+  async verifyGroupServiceContext(chatId: string, ownerUserId: string): Promise<boolean> {
+    const currentBot = await this.cardKitRequest({
+      url: `/open-apis/im/v1/chats/${encodeURIComponent(chatId)}/members/is_in_chat`, method: 'GET', data: undefined,
+    });
+    return currentBot.is_in_chat === true && await this.isDetailReaderMember(chatId, ownerUserId);
   }
 
   async isDetailReaderMember(chatId: string, userId: string): Promise<boolean> {

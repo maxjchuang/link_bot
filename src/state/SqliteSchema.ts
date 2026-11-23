@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 
-export const SQLITE_SCHEMA_VERSION = 33;
+export const SQLITE_SCHEMA_VERSION = 34;
 
 export function migrateSqliteSchema(db: Database.Database): void {
   // The gateway and host-manager deliberately share this WAL database. Give a
@@ -48,6 +48,22 @@ export function migrateSqliteSchema(db: Database.Database): void {
   if (current <= 30) migrateToVersion31(db);
   if (current <= 31) migrateToVersion32(db);
   if (current <= 32) migrateToVersion33(db);
+  if (current <= 33) migrateToVersion34(db);
+}
+
+function migrateToVersion34(db: Database.Database): void {
+  db.transaction(() => {
+    if ((db.pragma('user_version', {simple: true}) as number) >= 34) return;
+    db.exec(`CREATE TABLE group_services (
+      agent_id TEXT NOT NULL, chat_id TEXT NOT NULL, owner_user_id TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('pending','enabled','revoked')),
+      version INTEGER NOT NULL CHECK(version > 0), payload TEXT NOT NULL,
+      PRIMARY KEY(agent_id,chat_id));
+      CREATE TABLE group_service_events (
+      agent_id TEXT NOT NULL, event_id TEXT NOT NULL, chat_id TEXT NOT NULL,
+      PRIMARY KEY(agent_id,event_id));`);
+    db.pragma('user_version=34');
+  }).immediate();
 }
 
 function migrateToVersion33(db: Database.Database): void {

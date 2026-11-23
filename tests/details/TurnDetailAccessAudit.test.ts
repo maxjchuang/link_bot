@@ -248,11 +248,11 @@ describe('per-access detail audit', () => {
     audit.close();
     const db = new Database(path);
     try {
-      db.exec('UPDATE detail_security_contract SET version=1; PRAGMA user_version=30');
+      db.exec('DROP TABLE group_service_events; DROP TABLE group_services; UPDATE detail_security_contract SET version=1; PRAGMA user_version=30');
       const before = history(db);
       audit = new TurnDetailAccessAudit(path);
       expect(db.pragma('user_version', { simple: true })).toBe(SQLITE_SCHEMA_VERSION);
-      expect(SQLITE_SCHEMA_VERSION).toBe(33);
+      expect(SQLITE_SCHEMA_VERSION).toBe(34);
       expect(db.prepare('SELECT version FROM detail_security_contract WHERE id=1').get()).toEqual({ version: 3 });
       expect(history(db)).toEqual(before);
     } finally { audit.close(); db.close(); }

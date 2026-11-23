@@ -53,11 +53,12 @@ export class LiveTurnProjection implements TaskLifecycleEventSink {
       if (snapshot.pendingActions.size >= 32 && !snapshot.pendingActions.has(request.id)) return;
       snapshot.pendingActions.set(request.id, { requestRef: request.id, generation: request.generation,
         handlerUserId: request.ownerUserId, expiresAt: request.expiresAt, status,
-        title: request.method === 'item/commandExecution/requestApproval' ? '命令执行审批'
+        title: request.purpose === 'owner_authorization' ? '等待所有者处理'
+          : request.method === 'item/commandExecution/requestApproval' ? '命令执行审批'
           : request.method === 'item/fileChange/requestApproval' ? '文件变更审批' : '需要补充信息',
-        impact: sanitizeDetailText(request.riskSummary).text.slice(0, 240),
-        ...(request.operationCard?.messageAppLink ? { messageAppLink: request.operationCard.messageAppLink } : {}),
-        ...(request.operationCard?.messageId ? { messageId: request.operationCard.messageId } : {}) });
+        impact: request.purpose === 'owner_authorization' ? '请求已交给所有者，其他独立任务可继续。' : sanitizeDetailText(request.riskSummary).text.slice(0, 240),
+        ...(request.purpose !== 'owner_authorization' && request.operationCard?.messageAppLink ? { messageAppLink: request.operationCard.messageAppLink } : {}),
+        ...(request.purpose !== 'owner_authorization' && request.operationCard?.messageId ? { messageId: request.operationCard.messageId } : {}) });
     }
     snapshot.revision++;
     for (const listener of this.listeners) listener(toSnapshot(snapshot));

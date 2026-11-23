@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { Readable } from 'node:stream';
 import { LarkLongConnectionGateway } from '../../src/feishu/FeishuGateway.js';
+import type {PlatformGroupLifecycleEvent} from '../../src/feishu/GroupLifecycleEvent.js';
 
 type ReceiveHandler = (data: {
   message?: {
@@ -85,6 +86,8 @@ function createGatewayHarness(options: {
   let cardActionHandler: CardActionHandler | undefined;
   let botMenuHandler: BotMenuHandler | undefined;
   let reactionCreatedHandler: ReactionCreatedHandler | undefined;
+  let botAddedHandler: ((data: PlatformGroupLifecycleEvent) => Promise<void>) | undefined;
+  let botRemovedHandler: ((data: PlatformGroupLifecycleEvent) => Promise<void>) | undefined;
   const sent: Array<{ receive_id: string; content: string }> = [];
   const replies: Array<{ message_id: string; msg_type: string; content: string; reply_in_thread?: boolean }> = [];
   const requests: Array<{ url: string; method: string; data?: unknown }> = [];
@@ -153,6 +156,8 @@ function createGatewayHarness(options: {
         cardActionHandler = handlers['card.action.trigger'];
         botMenuHandler = handlers['application.bot.menu_v6'];
         reactionCreatedHandler = handlers['im.message.reaction.created_v1'];
+        botAddedHandler = handlers['im.chat.member.bot.added_v1'];
+        botRemovedHandler = handlers['im.chat.member.bot.deleted_v1'];
         return handlers;
       },
     }),
@@ -175,6 +180,8 @@ function createGatewayHarness(options: {
 
   return {
     gateway,
+    getBotAddedHandler: () => botAddedHandler!,
+    getBotRemovedHandler: () => botRemovedHandler!,
     request,
     sent,
     replies,
@@ -211,6 +218,35 @@ function createGatewayHarness(options: {
 }
 
 describe('LarkLongConnectionGateway', () => {
+  it('verifies both current bot presence and the configured owner before enabling group service', async () => {
+    const h = createGatewayHarness();
+    let botPresent = true;
+    let ownerPresent = true;
+    h.request.mockImplementation(async payload => {
+      if (payload.url.endsWith('/members/is_in_chat')) return {code: 0, data: {is_in_chat: botPresent}};
+      return {code: 0, data: {items: ownerPresent ? [{member_id: 'ou_owner'}] : [], has_more: false}};
+    });
+    expect(await h.gateway.verifyGroupServiceContext('oc_group', 'ou_owner')).toBe(true);
+    ownerPresent = false;
+    expect(await h.gateway.verifyGroupServiceContext('oc_group', 'ou_owner')).toBe(false);
+    ownerPresent = true; botPresent = false;
+    expect(await h.gateway.verifyGroupServiceContext('oc_group', 'ou_owner')).toBe(false);
+    h.request.mockRejectedValueOnce(new Error('membership unavailable'));
+    await expect(h.gateway.verifyGroupServiceContext('oc_group', 'ou_owner')).rejects.toThrow();
+  });
+  it('dispatches authenticated group lifecycle facts and propagates persistence failures', async () => {
+    const h = createGatewayHarness();
+    const onLifecycle = vi.fn(async () => undefined);
+    await h.gateway.start(async () => ({text: ''}), undefined, undefined, onLifecycle);
+    const event = {app_id: 'app', event_type: 'im.chat.member.bot.added_v1', event_id: 'evt',
+      chat_id: 'oc_group', create_time: '1000', operator_id: {open_id: 'ou_owner'}};
+    await h.getBotAddedHandler()(event);
+    expect(onLifecycle).toHaveBeenCalledWith({kind: 'added', eventId: 'evt', chatId: 'oc_group', occurredAt: 1000, operatorUserId: 'ou_owner'});
+    await h.getBotAddedHandler()({...event, app_id: 'other'});
+    expect(onLifecycle).toHaveBeenCalledTimes(1);
+    onLifecycle.mockRejectedValueOnce(new Error('persist failed'));
+    await expect(h.getBotRemovedHandler()({...event, event_type: 'im.chat.member.bot.deleted_v1'})).rejects.toThrow('persist failed');
+  });
   it('uses one ordered batch for inner-region replacements and refuses panel replacement shapes', async () => {
     const h = createGatewayHarness();
     h.request.mockResolvedValueOnce({ code: 0 });

@@ -43,11 +43,13 @@ export class TurnDetailArtifactService {
     private readonly gateway: Pick<FeishuGateway, 'uploadFile' | 'sendDetailFileToTarget'>,
     private readonly media?: Pick<MediaService, 'getAttachment' | 'saveAttachment'> & Partial<Pick<MediaService, 'recordDetailArtifactDelivery'>>,
     private readonly clock: () => Date = () => new Date(), private readonly maxBytes = 50 * 1024 * 1024,
-    private readonly telemetry?: DetailTelemetryPort, private readonly audit: DetailAccessAuditPort = unavailableDetailAudit) {
+    private readonly telemetry?: DetailTelemetryPort, private readonly audit: DetailAccessAuditPort = unavailableDetailAudit,
+    private readonly authorizeIdentity?: (identity: DetailTurnIdentity, userId: string) => Promise<void>) {
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 256 || maxBytes > 50 * 1024 * 1024) throw new Error('invalid_artifact_budget');
   }
 
   async requireRead(request: TurnArtifactRequest): Promise<DetailScope> {
+    await this.authorizeIdentity?.(request.identity, request.actor.userId);
     if (!['process', 'commands', 'files', 'result'].includes(request.category) || !Number.isSafeInteger(request.through) || request.through < 0
       || !/^[a-f0-9]{64}$/.test(request.version)) throw new Error('invalid_artifact');
     const policy = this.access(request.actor);

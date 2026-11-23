@@ -24,7 +24,8 @@ export class FeishuTurnDetailController {
     private readonly views: DetailViewStore, private readonly gateway: FeishuGateway, private readonly clock: () => Date = () => new Date(),
     private readonly results?: TurnResultStore,
     private readonly artifacts?: { service: TurnDetailArtifactService; enqueue(request: TurnArtifactRequest): void },
-    private readonly telemetry?: DetailTelemetryPort, private readonly audit: DetailAccessAuditPort = unavailableDetailAudit) {}
+    private readonly telemetry?: DetailTelemetryPort, private readonly audit: DetailAccessAuditPort = unavailableDetailAudit,
+    private readonly authorizeIdentity?: (identity: DetailTurnIdentity, userId: string) => Promise<void>) {}
 
   handle(input: FeishuIncomingCardAction & { action: TurnDetailCardAction }): Promise<FeishuOutgoingReply> {
     const key = `${input.action.cardRef}:${input.userId}:${input.action.category}`;
@@ -65,6 +66,7 @@ export class FeishuTurnDetailController {
       const refreshAccess = () => { sourceRead = undefined; memberRead = undefined; };
       const policy = new DetailAccessPolicy({
         resolveSource: async (messageId) => {
+          await this.authorizeIdentity?.(identity, input.userId);
           if (messageId !== input.messageId) return undefined;
           proof = await (sourceRead ??= this.gateway.resolveDetailMessageScope!(messageId));
           if (proof && proof.chatId !== input.chatId) throw new Error('access_denied');

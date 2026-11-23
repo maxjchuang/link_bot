@@ -2,8 +2,21 @@ export interface SanitizedDetailText { text: string; redacted: boolean }
 
 const HIDDEN = '[敏感内容已隐藏]';
 const LONG_LINE = '[未安全记录的长行已隐藏]';
-const SENSITIVE_LINE = /(?:authorization\s*:|cookie\s*:|(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password|passwd|secret|token|authorization[_-]?code)["'\\]*\s*[=:]|--(?:token|password|api-key|secret)(?:\s|=)|\bsk-(?:proj-|ant-)?[a-z0-9_-]+|https?:\/\/\S*(?:\/authorize(?:[?/#]|$)|[?&](?:code|token|access_token|auth_code|ticket|user_code|device_code|state|client_id)=))/i;
+const SENSITIVE_LINE = /(?:authorization\s*:|cookie\s*:|(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password|passwd|secret|token|authorization[_-]?code)["'\\]*\s*[=:]|--(?:token|password|api-key|secret)(?:\s|=)|\bsk-(?:proj-|ant-)?[a-z0-9_-]+|https?:\/\/\S*(?:\/authorize(?:[?/#]|$)|[?&](?:token|access_token|refresh_token|auth_code|user_code|device_code)=))/i;
 const SENSITIVE_CONTINUATION = /(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password|passwd|secret|token)["'\\]*\s*[:=]\s*(?:\{|\[)?\s*$/i;
+
+function hasAuthorizationFlowUrl(text: string): boolean {
+  for (const match of text.matchAll(/https?:\/\/[^\s<>"']+/gi)) {
+    try {
+      const url = new URL(match[0]);
+      if (url.username || url.password) return true;
+      const flow = /^(?:auth|login|sso)[.-]/i.test(url.hostname)
+        || url.pathname.split('/').some(part => /^(?:oauth\d*|auth|authen|authorize|login|sso|callback)$/i.test(part));
+      if (flow && ['code','ticket','state','client_id'].some(key => url.searchParams.has(key))) return true;
+    } catch { /* A malformed business URL is not itself proof of a credential. */ }
+  }
+  return false;
+}
 
 /** Conservative known-operation classifier, not a guarantee for unmarked business secrets. */
 export function isSensitiveDetailCommand(command: string): boolean {
@@ -88,7 +101,7 @@ export class DetailSanitizer {
       this.redacted = true;
       return HIDDEN;
     }
-    if (SENSITIVE_LINE.test(clean)) {
+    if (SENSITIVE_LINE.test(clean) || hasAuthorizationFlowUrl(clean)) {
       if (SENSITIVE_CONTINUATION.test(clean)) this.sensitiveContinuation = true;
       this.redacted = true; return HIDDEN;
     }

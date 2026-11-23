@@ -1,4 +1,4 @@
-import { rename,writeFile } from 'node:fs/promises';
+import { readFile,rename,writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe,expect,it,vi } from 'vitest';
 import type { DockerCommandRunner } from '../../src/runtime/DockerRuntime.js';
@@ -9,6 +9,31 @@ UserSandboxDockerRuntime,userSandboxOwnerKey,
 import { createTmpDir } from '../helpers/tmp.js';
 
 describe('UserSandboxDockerRuntime', () => {
+  it('mounts the fixed owner/app identity read-only only into the configured owner runtime', async () => {
+    const root = await createTmpDir();
+    const runner: DockerCommandRunner = {run: vi.fn(async args => args[3] === '{{.State.Status}}'
+      ? {stdout: '', stderr: 'missing', exitCode: 1} : {stdout: 'a'.repeat(64), stderr: '', exitCode: 0})};
+    const docker = new UserSandboxDockerRuntime({...config(root), agentIdentity: {appId: 'app_test', ownerUserId: 'ou_owner'}},
+      runner, async () => undefined);
+    const runtime = await docker.provision({id: 'owner_sandbox', ownerId: 'ou_owner', generation: 1});
+    const create = vi.mocked(runner.run).mock.calls.find(([args]) => args[0] === 'create')![0];
+    expect(create).toContain(`type=bind,src=${join(runtime.bridgeDirectory,'agent-identity.json')},dst=/run/link-bot/secrets/agent-identity.json,readonly`);
+    expect(create).toContain('LINK_BOT_PERSONAL_AGENT=1');
+    expect(JSON.parse(await readFile(join(runtime.bridgeDirectory,'agent-identity.json'),'utf8'))).toEqual({appId: 'app_test', ownerUserId: 'ou_owner'});
+    await docker.provision({id: 'legacy_sandbox', ownerId: 'ou_legacy', generation: 1});
+    const second = vi.mocked(runner.run).mock.calls.filter(([args]) => args[0] === 'create')[1][0];
+    expect(second).not.toContain('LINK_BOT_PERSONAL_AGENT=1');
+  });
+  it('rejects an existing owner runtime without the guard mount instead of silently running or recycling it', async () => {
+    const root = await createTmpDir();
+    const runner: DockerCommandRunner = {run: vi.fn(async args => ({
+      stdout: args[3] === '{{.State.Status}}' ? 'running' : '[]', stderr: '', exitCode: 0,
+    }))};
+    const docker = new UserSandboxDockerRuntime({...config(root), agentIdentity: {appId: 'app_test', ownerUserId: 'ou_owner'}},
+      runner, async () => undefined);
+    await expect(docker.provision({id: 'owner_sandbox', ownerId: 'ou_owner', generation: 1})).rejects.toThrow('controlled image upgrade');
+    expect(vi.mocked(runner.run).mock.calls.some(([args]) => ['rm','create','stop'].includes(args[0]))).toBe(false);
+  });
   it('verifies project origin and reads the current branch without checkout, clean, reset, or fetch',async()=>{
     const root=await createTmpDir();
     const runner: DockerCommandRunner={run:vi.fn(async(args)=>({stdout:args.includes('get-url')?'git@github.com:example/tools.git\n':'my-uncommitted-work\n',stderr:'',exitCode:0}))};

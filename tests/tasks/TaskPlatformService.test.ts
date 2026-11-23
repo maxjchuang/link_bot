@@ -36,8 +36,149 @@ type TaskPublishBroker,type TaskRuntimeProvisioner
 import type { TaskRecord,TaskRepositoryRecord } from '../../src/tasks/TaskTypes.js';
 import { sampleConfig } from '../helpers/fakes.js';
 import { createTmpDir } from '../helpers/tmp.js';
+import {createHash} from 'node:crypto';
+import {resolveAgentExecutionIdentity} from '../../src/security/AgentExecutionIdentity.js';
 
 describe('TaskPlatformService', () => {
+  it('binds a group-authorized project using the agent owner without making the requester an administrator', async () => {
+    const h = await createHarness(undefined, true, true, false, undefined, undefined, undefined, false, undefined, undefined, true);
+    let taskId: string | undefined;
+    try {
+      const actor = {chatType: 'group' as const, chatId: 'oc_agent_test', topicId: 'topic', userId: 'ou_member_a', groupServiceVersion: 1};
+      h.config.projects[0].access = {allowedUsers: [], allowedChats: ['oc_agent_test'], knowledgeApprovers: []};
+      ({taskId} = await h.service.createTask({...actor, mode: 'chat'}));
+      h.provisioner.prepareProjectBinding = vi.fn(async () => ({cwd: '/workspace/projects/repo', branchName: 'branch'}));
+      await h.service.bindExistingProject(actor, h.config.projects[0].id);
+      expect(h.store.getTask(taskId)).toMatchObject({ownerUserId: 'ou_owner', agentOwnerUserId: 'ou_owner', mode: 'project'});
+      expect(h.store.getTaskMembership(taskId, actor.userId)?.role).toBe('member');
+      expect(h.provisioner.prepareProjectBinding).toHaveBeenCalledWith(expect.objectContaining({ownerUserId: 'ou_owner'}), expect.anything());
+    } finally {h.approvals.dispose(); if (taskId) await h.stop(taskId); else h.store.close();}
+  });
+  it('lets B finish independent work while A waits for the owner, then resumes only the approved operation once', async () => {
+    const h = await createHarness(undefined, true, true, false, undefined, undefined, undefined, false, undefined, undefined, true);
+    h.approvals.setOwnerContinuation({suspend: async () => {await h.backend.interruptTurn();},
+      resume: request => h.service.resumeOwnerOperation(request)});
+    let taskId: string | undefined;
+    try {
+      const group = {chatType: 'group' as const, chatId: 'oc_agent_test', userId: 'ou_member_a', groupServiceVersion: 1};
+      h.backend.emitTurnStarted = false;
+      h.backend.startTurnResultId = 'remote_a';
+      await h.service.send({...group, text: 'operation A', messageId: 'a-source'});
+      taskId = h.store.listTasks()[0].id;
+      const a = h.store.listTurnsByTask(taskId)[0];
+      const request = await h.approvals.capture({type: 'backend.server_request', taskId, generation: 1, requestId: 'approval_a',
+        method: 'item/commandExecution/requestApproval', params: {threadId: 'thread_1', turnId: 'remote_a', command: 'controlled-command'}});
+      // No forced activeTurnId clearing: upstream completion closes A normally.
+      expect(h.store.getTask(taskId)?.activeTurnId).toBe(a.id);
+      h.backend.threadTurns = [{id: 'remote_a', status: 'inProgress'}];
+      await h.service.reconcileStalledTurns(0, 0);
+      expect(h.backend.startedTurns).toHaveLength(1); // A pending owner operation is never an automatic whole-task retry.
+      h.backend.emit(taskId, {type: 'turn.completed', taskId, threadId: 'thread_1', turnId: 'remote_a', status: 'interrupted', turn: {items: []}});
+      await waitFor(() => !h.store.getTask(taskId!)?.activeTurnId);
+      h.backend.startTurnResultId = 'remote_b';
+      await h.service.send({...group, userId: 'ou_member_b', text: 'independent safe B', messageId: 'b-source'});
+      expect(h.backend.startedTurns).toHaveLength(2);
+      await h.approvals.decide({requestId: request.id, userId: 'ou_owner', generation: 1, decision: 'allow'});
+      expect(h.backend.startedTurns).toHaveLength(2); // Wait for B, do not steer approval into B's turn.
+      h.backend.startTurnResultId = 'remote_resumed';
+      h.backend.emit(taskId, {type: 'turn.completed', taskId, threadId: 'thread_1', turnId: 'remote_b', status: 'completed', turn: {items: []}});
+      await waitFor(() => h.backend.startedTurns.length === 3);
+      const resumed = h.store.listTurnsByTask(taskId).find(turn => turn.internalOperationId === `owner-operation:${request.id}`)!;
+      expect(resumed).toMatchObject({createdBy: 'ou_member_a', groupServiceVersion: 1});
+      expect(h.backend.startedTurns[2].prompt).toContain('controlled-command');
+      expect(h.backend.startedTurns[2].prompt).not.toContain('independent safe B');
+      expect(h.store.getAppServerRequest(request.id)?.continuation).toMatchObject({state: 'submitted', resumedLocalTurnId: resumed.id});
+      await h.approvals.decide({requestId: request.id, userId: 'ou_owner', generation: 1, decision: 'allow'});
+      expect(h.backend.startedTurns).toHaveLength(3);
+    } finally {h.approvals.dispose(); if (taskId) await h.stop(taskId); else h.store.close();}
+  });
+  it('persists revocation before stopping work and prevents startup revival after rollback', async () => {
+    const h = await createHarness(undefined, true, true, false, undefined, undefined, undefined, false, undefined, undefined, true);
+    let taskId: string | undefined;
+    try {
+      await h.service.send({chatType: 'group', chatId: 'oc_agent_test', userId: 'ou_member_a',
+        groupServiceVersion: 1, text: 'test work', messageId: 'revocation-source'});
+      taskId = h.store.listTasks()[0].id;
+      const turn = h.store.listTurnsByTask(taskId)[0];
+      const stopPersisted = vi.fn(async () => {
+        expect(h.store.getTurn(turn.id)?.state).toBe('interrupted');
+        expect(h.store.getTask(taskId!)?.activeTurnId).toBeUndefined();
+      });
+      h.service.setPersistedTaskStopper(stopPersisted);
+      const agentId = `agent_${createHash('sha256').update(h.config.feishu.appId).digest('hex').slice(0,24)}`;
+      h.store.applyGroupServiceTransition({agentId, chatId: 'oc_agent_test', ownerUserId: 'ou_owner',
+        status: 'revoked', eventId: 'revoke-work', occurredAt: 2000, source: 'owner', expectedVersion: 1, updatedAt: 'now'});
+      expect(await h.service.reconcilePersonalAgentWork('oc_agent_test')).toEqual([taskId]);
+      expect(stopPersisted).toHaveBeenCalledOnce();
+      expect(h.store.getTurn(turn.id)).toMatchObject({state: 'interrupted', failure: 'personal_agent_work_revoked'});
+      expect(h.store.getTask(taskId)?.runtimeState).toBe('warm');
+      expect(h.store.getTask(taskId)?.activeTurnId).toBeUndefined();
+      h.config.personalAgent = {enabled: false};
+      const resume = vi.spyOn(h.backend, 'resumeTask');
+      await h.service.recoverStartup();
+      expect(resume).not.toHaveBeenCalled();
+      expect(h.provisioner.delete).not.toHaveBeenCalled();
+    } finally {h.approvals.dispose(); if (taskId) await h.stop(taskId); else h.store.close();}
+  });
+  it('fails closed when a persisted process cannot be confirmed stopped', async () => {
+    const h = await createHarness(undefined, true, true, false, undefined, undefined, undefined, false, undefined, undefined, true);
+    let taskId: string | undefined;
+    try {
+      await h.service.send({chatType: 'group', chatId: 'oc_agent_test', userId: 'ou_member_a', groupServiceVersion: 1,
+        text: 'work', messageId: 'stop-failure-source'});
+      taskId = h.store.listTasks()[0].id;
+      h.config.personalAgent = {enabled: false, ownerUserId: 'ou_owner'};
+      h.service.setPersistedTaskStopper(async () => {throw new Error('supervisor unavailable');});
+      await expect(h.service.reconcilePersonalAgentWork()).rejects.toThrow('could not be confirmed stopped');
+      expect(h.store.getTask(taskId)?.runtimeState).toBe('failed');
+      expect(h.store.getTask(taskId)?.activeTurnId).toBeUndefined();
+      expect(h.store.listTurnsByTask(taskId)[0].state).toBe('interrupted');
+      expect(h.provisioner.delete).not.toHaveBeenCalled();
+    } finally {h.approvals.dispose(); if (taskId) await h.stop(taskId); else h.store.close();}
+  });
+  it('accepts owner authorization only from its original private card, not group/requester callbacks', async () => {
+    const h = await createHarness(undefined, true, true, false, undefined, undefined, undefined, false, undefined, undefined, true);
+    let taskId: string | undefined;
+    try {
+      const input = {chatType: 'group' as const, chatId: 'oc_agent_test', userId: 'ou_member_a',
+        groupServiceVersion: 1, text: '写文档', messageId: 'owner_authorization_source'};
+      await h.service.send(input); taskId = h.store.listTasks()[0].id;
+      const turn = h.store.listTurnsByTask(taskId)[0];
+      const request = await h.approvals.capture({type: 'backend.server_request', taskId, generation: 1, requestId: 'native_approval',
+        method: 'item/commandExecution/requestApproval', params: {threadId: h.store.getTask(taskId)!.codexThreadId, turnId: turn.codexTurnId, command: 'controlled operation'}});
+      expect(request.ownerUserId).toBe('ou_owner');
+      h.store.updateAppServerRequest(request.id, current => ({...current, operationCard: {status: 'sent', messageId: 'original_private_card', at: 'now'}}));
+      const decision = {requestId: request.id, generation: 1, decision: 'allow' as const};
+      await expect(h.service.decideAppServerRequest({...input, ...decision})).rejects.toThrow('original private');
+      await expect(h.service.decideAppServerRequest({...input, ...decision, userId: 'ou_owner'})).rejects.toThrow('original private');
+      await expect(h.service.decideAppServerRequest({...input, ...decision, chatType: 'private', userId: 'ou_owner', messageId: 'forwarded_card'})).rejects.toThrow('original private');
+      expect(h.backend.responses).toHaveLength(0);
+      await expect(h.service.decideAppServerRequest({...input, ...decision, chatType: 'private', userId: 'ou_owner', messageId: 'original_private_card'})).resolves.toBe('Decision applied.');
+      expect(h.backend.responses).toHaveLength(1);
+    } finally {h.approvals.dispose(); if (taskId) await h.stop(taskId); else h.store.close();}
+  });
+  it('runs an ordinary non-admin document request in the owner sandbox while retaining the real author', async () => {
+    const h = await createHarness(undefined, true, true, false, undefined, undefined, undefined, false, undefined, undefined, true);
+    let taskId: string | undefined;
+    try {
+      const group = {chatType: 'group' as const, chatId: 'oc_agent_test', userId: 'ou_member_a', groupServiceVersion: 1};
+      await h.service.send({...group, text: '写一篇未来1年规划文档', messageId: 'msg_document'});
+      const tasks = h.store.listTasks(); expect(tasks).toHaveLength(1);
+      taskId = tasks[0].id;
+      expect(tasks[0]).toMatchObject({ownerUserId: 'ou_owner', agentOwnerUserId: 'ou_owner', identityMode: 'personal-agent', mode: 'chat'});
+      expect(h.provisioner.provision).toHaveBeenCalledWith(expect.objectContaining({taskId, ownerUserId: 'ou_owner'}));
+      expect(h.store.listTurnsByTask(taskId)[0]).toMatchObject({createdBy: 'ou_member_a', groupServiceVersion: 1, sourceChatId: group.chatId});
+      expect(h.store.getTaskMembership(taskId, 'ou_member_a')?.role).toBe('member');
+      expect(h.backend.startedTurns[0].prompt).toContain('ou_member_a');
+      expect(h.backend.startedTurns[0].prompt).toContain('ou_owner');
+      expect(h.backend.startedTurns[0].prompt).toContain('写一篇未来1年规划文档');
+      await h.service.send({...group, userId: 'ou_member_b', messageId: 'msg_supplement', text: '补充里程碑'});
+      expect(h.store.listTasks()).toHaveLength(1);
+      expect(h.backend.steeredTurns[0].prompt).toContain('ou_member_b');
+      expect(h.store.getTaskMembership(taskId, 'ou_member_b')?.role).toBe('member');
+      expect(h.config.upgrade.adminUsers).not.toContain('ou_member_a');
+    } finally {if (taskId) await h.stop(taskId); else h.store.close();}
+  });
   it('retries an uninitialized chat task without silently binding it to a project', async () => {
     const h = await createHarness(undefined, true, true);
     h.config.userSandboxes = { enabled: true, enabledOwners: [], legacyFallbackEnabled: false,
@@ -4154,12 +4295,20 @@ async function createHarness(
   recordDetails = false,
   prepareSensitiveReply?: (context: SensitiveReplyContext, text: string) => Promise<string>,
   turnExperience?: AppServerTurnExperience,
+  personalAgent = false,
 ) {
   const root = await createTmpDir();
   const store = new SqliteStateStore(join(root, 'state.sqlite'));
   const backend = new FakeBackend();
   const rendered: Array<{ id: string }> = [];
-  const approvals = new AppServerRequestService(store, backend, { render: async (request) => { rendered.push(request); } });
+  const approvals = new AppServerRequestService(store, backend, { render: async (request) => { rendered.push(request); } },
+    300_000, undefined, personalAgent ? (task, turn) => {
+      const scope = store.getTaskScope(task.id)!;
+      const identity = resolveAgentExecutionIdentity({config, task, scope, requesterUserId: turn.createdBy, groupServiceVersion: turn.groupServiceVersion});
+      const grant = store.getGroupService(identity.agentId, scope.chatId!);
+      if (grant?.status !== 'enabled' || grant.version !== turn.groupServiceVersion) throw new Error('Group service revoked.');
+      return identity;
+    } : undefined);
   const deliver = vi.fn(async () => undefined);
   const outbox = new FeishuOutbox(store, { deliver });
   const provisioner: TaskRuntimeProvisioner & {
@@ -4193,6 +4342,17 @@ async function createHarness(
   config.taskPlatformRollout.conversationScopedTasks = conversationScopedTasks;
   config.taskPlatformRollout.multiRepositoryTasks = multiRepositoryTasks;
   config.taskPlatformRollout.managedMemory = managedMemory;
+  if (personalAgent) {
+    config.personalAgent = {enabled: true, ownerUserId: 'ou_owner'};
+    config.upgrade.adminUsers = ['ou_owner'];
+    config.taskPlatformRollout.projectFreeChat = true;
+    config.userSandboxes = {enabled: true, enabledOwners: ['ou_owner'], legacyFallbackEnabled: false,
+      maxAppServersPerUser: 8, maxActiveTurnsPerUser: 4, processIdleTimeoutMinutes: 120,
+      containerIdleTimeoutMinutes: 1440, containerWrapperRetentionHours: 24};
+    store.applyGroupServiceTransition({agentId: `agent_${createHash('sha256').update(config.feishu.appId).digest('hex').slice(0,24)}`,
+      chatId: 'oc_agent_test', ownerUserId: 'ou_owner', status: 'enabled',
+      eventId: 'fixture_enable', occurredAt: 1000, source: 'owner', expectedVersion: 0, updatedAt: 'now'});
+  }
   const contexts = new TaskContextService(store, backend);
   const repositories = new TaskRepositoryService(store, provisioner, () => undefined);
   const memory = new MemoryService(store);
@@ -4200,8 +4360,9 @@ async function createHarness(
   const details = recordDetails ? createTurnDetailRuntime(join(root, 'state.sqlite')) : undefined;
   const service = new TaskPlatformService(config, store, backend, provisioner, approvals, outbox, publishBrokerFactory?.(store), undefined, undefined, undefined, contexts, repositories, memory, undefined, undefined, turnExperience, undefined, conversationContext, chatInfo, media, details?.sink, prepareSensitiveReply
   );
+  service.setPersonalMemberVerifier(async () => true);
   return {
-    root, store, backend, rendered, deliver, outbox, provisioner, service, config, media,
+    root, store, backend, rendered, deliver, outbox, provisioner, service, config, media, approvals,
     flushDetails: async () => { await details?.flush(); },
     controller: new FeishuTaskController(service),
     stop: async (taskId: string) => { await backend.stopTask(taskId); await service.waitForEvents(taskId); await details?.close(); store.close(); },

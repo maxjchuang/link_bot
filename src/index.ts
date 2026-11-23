@@ -54,7 +54,8 @@ export async function bootstrap(deps: BootstrapDeps = {}): Promise<void> {
   const userWhitelistManager = deps.userWhitelistManager ?? new UserWhitelistManager(projectRoot, config);
   if (!config.taskPlatformRollout.enabled) throw new Error('The App Server task platform must be enabled.');
   if (!config.userSandboxes?.enabled || config.userSandboxes.legacyFallbackEnabled
-    || config.userSandboxes.enabledOwners.length > 0 || config.readyPool.enabled) {
+    || (config.userSandboxes.enabledOwners.length > 0 && !(config.personalAgent?.enabled
+      && config.userSandboxes.enabledOwners.every(owner => owner === config.personalAgent!.ownerUserId))) || config.readyPool.enabled) {
     throw new Error('User Sandbox must be enabled for all authorized owners with legacy fallback and task ready pool disabled.');
   }
   const logger = createAppLogger({ level: config.logLevel, sink: deps.logger ?? console });
@@ -133,7 +134,11 @@ export async function bootstrap(deps: BootstrapDeps = {}): Promise<void> {
         botOpenIdResolved: message.botOpenIdResolved,
       },
     });
-    const generallyAuthorized = isAuthorizedMessage(config, message);
+    const personalMessage = config.personalAgent?.enabled ? await taskPlatform?.admitPersonalMessage?.(message) : undefined;
+    const generallyAuthorized = config.personalAgent?.enabled
+      ? Boolean(personalMessage) || (message.userId === config.personalAgent.ownerUserId && isAuthorizedMessage(config, message))
+      : isAuthorizedMessage(config, message);
+    if (personalMessage) message = personalMessage;
     try {
       if (generallyAuthorized) await taskPlatform?.observeAmbientMessage?.(message);
     } catch (error) {
@@ -156,7 +161,8 @@ export async function bootstrap(deps: BootstrapDeps = {}): Promise<void> {
       });
       return { text: '', rendered: undefined };
     }
-    const fixedFlowBypass = Boolean(publicFixedFlow) && isAuthorizedChat(config, message);
+    const fixedFlowBypass = !config.personalAgent?.enabled && !config.personalAgent?.ownerUserId
+      && Boolean(publicFixedFlow) && isAuthorizedChat(config, message);
     if (!generallyAuthorized && !fixedFlowBypass) {
       logger.info('inbound.unauthorized_dropped', {
         chat: message.chatId,
@@ -193,6 +199,14 @@ export async function bootstrap(deps: BootstrapDeps = {}): Promise<void> {
       });
     }
     const textWithoutMentions = message.text.replace(/^(?:@\S+(?:\s+|$))*/, '').trim();
+    if (config.personalAgent?.enabled && message.userId !== config.personalAgent.ownerUserId && textWithoutMentions.startsWith('/')) {
+      return {text: '当前仅向群成员开放普通任务请求；管理命令由所有者处理。', rendered: undefined};
+    }
+    if (config.personalAgent?.enabled && /^\/agent\s+group(?:\s|$)/.test(textWithoutMentions)) {
+      const reply = await taskPlatform?.handlePersonalOwnerCommand?.({...message, text: textWithoutMentions});
+      if (reply) return reply;
+      return {text: '群服务管理暂不可用。', rendered: undefined};
+    }
     if (generallyAuthorized && /^\/retry-sensitive\b/.test(textWithoutMentions)) {
       const reply = await taskPlatform?.retrySensitiveReply?.({ ...message, text: textWithoutMentions });
       if (reply) return reply;
@@ -270,6 +284,11 @@ export async function bootstrap(deps: BootstrapDeps = {}): Promise<void> {
     }
 
     const completeInbound = async <T>(result: T): Promise<T> => {
+      if (personalMessage?.groupServiceVersion !== undefined) {
+        const current = await taskPlatform?.admitPersonalMessage?.(message);
+        if (!current || current.groupServiceVersion !== personalMessage.groupServiceVersion)
+          throw new Error('Group service changed before direct reply; delivery stopped.');
+      }
       await inboundStore.completeInboundMessage(message.messageId);
       return result;
     };
@@ -351,7 +370,9 @@ export async function bootstrap(deps: BootstrapDeps = {}): Promise<void> {
   const onCardAction = async (action: FeishuIncomingCardAction) => {
     // Old cards must not retain access after a user/chat is removed from config.
     // Apply before every dispatch path, including details and admin decisions.
-    if (!isAuthorizedMessage(config, action)) {
+    const personalDetailAllowed = config.personalAgent?.enabled && action.action.kind === 'turn_detail'
+      && await taskPlatform?.allowsPersonalDetailAction?.(action) === true;
+    if (!personalDetailAllowed && ((config.personalAgent?.enabled && action.userId !== config.personalAgent.ownerUserId) || !isAuthorizedMessage(config, action))) {
       logger.info('inbound.card_action_unauthorized_dropped', {
         chat: action.chatId, type: action.chatType, user: action.userId,
         messageId: action.messageId, kind: action.action.kind,
@@ -457,6 +478,11 @@ export async function bootstrap(deps: BootstrapDeps = {}): Promise<void> {
   await gateway.start(onMessage, onCardAction, async (topic) => {
     logger.info('inbound.topic_closed', { chat: topic.chatId, topicId: topic.topicId, user: topic.operatorUserId });
     await taskController?.handleTopicClosed?.(topic);
+  }, async event => {
+    // Observe trusted normalized lifecycle facts even while admission is off.
+    // This is evidence of delivery, not evidence that the group was enabled.
+    await store.appendEvent({type: 'group.lifecycle_observed', at: new Date().toISOString(), data: {...event}});
+    await taskPlatform?.handleGroupLifecycle?.(event);
   });
 }
 

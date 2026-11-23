@@ -62,6 +62,12 @@ const config: BotConfig = {
 };
 
 describe('security guards', () => {
+  it.each([true, false])('keeps generic controls owner-only when personal agent enabled=%s', enabled => {
+    const personal = {...config, restrictUsers: false, allowUnlistedGroupUsers: true,
+      personalAgent: {enabled, ownerUserId: 'ou_1'}};
+    expect(isAuthorizedMessage(personal, {userId: 'ou_other', chatId: 'oc_1', chatType: 'group'})).toBe(false);
+    expect(isAuthorizedMessage(personal, {userId: 'ou_1', chatId: 'oc_1', chatType: 'group'})).toBe(true);
+  });
   it('allows private messages from allowlisted users', () => {
     expect(isAuthorizedMessage(config, { userId: 'ou_1', chatId: 'ou_1', chatType: 'private' })).toBe(true);
   });
