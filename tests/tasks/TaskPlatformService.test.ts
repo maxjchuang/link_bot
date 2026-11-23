@@ -40,6 +40,26 @@ import {createHash} from 'node:crypto';
 import {resolveAgentExecutionIdentity} from '../../src/security/AgentExecutionIdentity.js';
 
 describe('TaskPlatformService', () => {
+  it('persists a group epoch revocation when only the master switch is turned off', async () => {
+    const h = await createHarness(undefined, true, true, false, undefined, undefined, undefined, false, undefined, undefined, true);
+    let taskId: string | undefined;
+    try {
+      const actor = {chatType: 'group' as const, chatId: 'oc_agent_test', topicId: 'topic', userId: 'ou_member_a', groupServiceVersion: 1};
+      await h.service.send({...actor, text: 'original work', messageId: 'rollback-source'});
+      taskId = h.store.listTasks()[0].id;
+      const turn = h.store.listTurnsByTask(taskId)[0];
+      h.store.updateTask(taskId, current => ({...current,
+        projectBindContinuation: {requestedBy: actor.userId, turnId: turn.id, text: 'old queued work'}}));
+      h.config.personalAgent = {enabled: false, ownerUserId: 'ou_owner'};
+      await h.service.reconcilePersonalAgentWork();
+      const agentId = `agent_${createHash('sha256').update(h.config.feishu.appId).digest('hex').slice(0,24)}`;
+      expect(h.store.getGroupService(agentId, actor.chatId)).toMatchObject({status: 'revoked', version: 2});
+      h.config.personalAgent = {enabled: true, ownerUserId: 'ou_owner'};
+      await expect(h.service.prepareSend({...actor, text: 'continue old work'})).rejects.toThrow('service');
+      expect(h.store.getTask(taskId)?.projectBindContinuation?.text).toBe('old queued work');
+      expect(h.store.getTurn(turn.id)?.state).toBe('interrupted');
+    } finally {h.approvals.dispose(); if (taskId) await h.stop(taskId); else h.store.close();}
+  });
   it('binds a group-authorized project using the agent owner without making the requester an administrator', async () => {
     const h = await createHarness(undefined, true, true, false, undefined, undefined, undefined, false, undefined, undefined, true);
     let taskId: string | undefined;

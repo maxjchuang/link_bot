@@ -90,6 +90,11 @@ export class SqliteStateStore {
       'SELECT payload FROM group_services WHERE agent_id=? AND chat_id=?').get(agentId, chatId));
   }
 
+  listGroupServices(agentId: string): GroupServiceRecord[] {
+    return this.db.prepare('SELECT payload FROM group_services WHERE agent_id=? ORDER BY chat_id')
+      .all(agentId).map(payloadRowRequired<GroupServiceRecord>);
+  }
+
   applyGroupServiceTransition(input: GroupServiceTransition): GroupServiceRecord | undefined {
     if (!input.agentId || !input.chatId || !input.ownerUserId || !input.eventId
       || !Number.isSafeInteger(input.occurredAt) || input.occurredAt <= 0

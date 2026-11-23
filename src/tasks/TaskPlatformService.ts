@@ -188,6 +188,17 @@ export class TaskPlatformService implements TaskControlOperations {
   /** Reconciles persisted revocation before recovery, or immediately after a grant changes. */
   async reconcilePersonalAgentWork(chatId?: string): Promise<string[]> {
     const stopped: string[] = [];
+    if (!this.config.personalAgent?.enabled) {
+      // A restart with the master switch off must leave a durable epoch fence.
+      // Re-enabling configuration alone cannot revive an old queued continuation.
+      const agentId = agentIdForApp(this.config.feishu.appId), now = this.clock();
+      for (const grant of this.store.listGroupServices(agentId)) {
+        if (grant.status === 'revoked' || chatId && grant.chatId !== chatId) continue;
+        this.store.applyGroupServiceTransition({agentId, chatId: grant.chatId, ownerUserId: grant.ownerUserId,
+          status: 'revoked', expectedVersion: grant.version, eventId: `mode-disabled:${grant.chatId}:${grant.version}`,
+          source: 'owner', occurredAt: Math.max(now.getTime(), grant.occurredAt), updatedAt: now.toISOString()});
+      }
+    }
     for (const task of this.store.listTasks()) {
       const quarantineLegacy = task.identityMode !== 'personal-agent' && Boolean(this.config.personalAgent?.ownerUserId)
         && (this.config.personalAgent?.enabled || task.ownerUserId !== this.config.personalAgent?.ownerUserId);
