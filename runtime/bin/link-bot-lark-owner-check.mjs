@@ -45,7 +45,14 @@ export function checkOwnerInvocation(args, policy, queryStatus) {
   // Bot transport remains host-managed. Sandbox business tools may not downgrade identities.
   if (selected === 'bot') throw new Error('owner_user_identity_required');
   if (selected !== 'user' && !statusDiagnostic) throw new Error('explicit_user_identity_required');
-  validateOwnerStatus(queryStatus(), policy);
+  let status = queryStatus();
+  const value = status?.data ?? status, user = value?.identities?.user;
+  // Native verification can refresh a token while returning the pre-refresh cached status.
+  // Recheck once, only for the already verified same owner/app; never initiate login.
+  if (status?.ok !== false && value?.appId === policy.appId && user?.openId === policy.ownerUserId
+    && user?.verified === true && user?.available === true
+    && (user?.status === 'needs_refresh' || user?.tokenStatus === 'needs_refresh')) status = queryStatus();
+  validateOwnerStatus(status, policy);
 }
 
 export function main(args = process.argv.slice(2)) {

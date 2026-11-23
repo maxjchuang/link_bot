@@ -5,6 +5,18 @@ const policy = {appId: 'app_test', ownerUserId: 'ou_owner'};
 const status = {appId: 'app_test', identities: {user: {openId: 'ou_owner', userName: 'Same Name',
   verified: true, available: true, status: 'ready', tokenStatus: 'valid'}}};
 describe('owner CLI identity guard', () => {
+  it('rechecks a verified same-owner native refresh once without initiating authorization', () => {
+    const refreshing = {...status, identities: {user: {...status.identities.user, status: 'needs_refresh', tokenStatus: 'needs_refresh'}}};
+    const query = vi.fn().mockReturnValueOnce(refreshing).mockReturnValue(status);
+    expect(() => checkOwnerInvocation(['docs','+create','--as','user'], policy, query)).not.toThrow();
+    expect(query).toHaveBeenCalledTimes(2);
+    const wrong = vi.fn(() => ({...refreshing, appId: 'other-app'}));
+    expect(() => checkOwnerInvocation(['docs','+create','--as','user'], policy, wrong)).toThrow('mismatch');
+    expect(wrong).toHaveBeenCalledOnce();
+    const neverReady = vi.fn(() => refreshing);
+    expect(() => checkOwnerInvocation(['docs','+create','--as','user'], policy, neverReady)).toThrow('unavailable');
+    expect(neverReady).toHaveBeenCalledTimes(2);
+  });
   it.each([['--profile','other','docs','+create','--as','user'],
     ['docs','+create','--as','user','--profile=other']].map(args => [args]))('rejects executing under a profile other than the verified one: %j', args => {
     const query = vi.fn(() => status);
